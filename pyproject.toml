@@ -1,0 +1,22 @@
+[project]
+name = "arduino-cardiopump"
+version = "0.1.0"
+description = "Backend skeleton for an Arduino-controlled Parker Gemini GV gear pump."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+cardiopump-backend = "cardiopump_backend.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cardiopump_backend"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/cardiopump_backend/web" = "cardiopump_backend/web"

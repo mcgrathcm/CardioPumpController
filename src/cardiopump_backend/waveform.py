@@ -195,7 +195,7 @@ class WaveformProgram:
             "clip_negative_flow": self.clip_negative_flow,
             "negative_clipped_sample_count": self.negative_clipped_sample_count,
             "total_stroke_volume_ml": self.total_stroke_volume_ml,
-            "calibration": "linear_full_scale",
+            "calibration": "firmware_managed",
             "preview": preview,
         }
 
@@ -217,7 +217,7 @@ class WaveformProgram:
         return tuple(max(0.0, flow) for flow in flows)
 
     def _flow_to_drive_fraction(self, flow_ml_s: float, *, clip: bool = True) -> float:
-        # This is the linear full-scale fallback until the user calibration curve exists.
+        # Q15 preserves waveform shape; firmware applies calibration or its conservative fallback.
         max_flow = self.max_flow_ml_s
         drive_fraction = 0.0 if max_flow == 0.0 else flow_ml_s / max_flow
         return max(-1.0, min(1.0, drive_fraction)) if clip else drive_fraction

@@ -117,6 +117,12 @@ h2 {
   color: #687384;
 }
 
+.pill.warning {
+  border-color: #d6aa52;
+  background: #fff8e5;
+  color: #76520b;
+}
+
 .pill.bad {
   border-color: #d77d7d;
   background: #fff0f0;
@@ -257,12 +263,66 @@ h2 {
 .file-control input,
 .waveform-settings input,
 .trigger-settings input,
-.setup-control select {
+.setup-control select,
+.calibration-measurement input,
+.calibration-measurement select {
   min-height: 40px;
   padding: 8px 10px;
   border: 1px solid #c8d1dc;
   border-radius: 6px;
   color: #17202a;
+}
+
+.calibration-points {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0;
+}
+
+.calibration-point {
+  display: flex;
+  justify-content: space-between;
+  padding: 7px 9px;
+  border: 1px solid #e0e5eb;
+  border-radius: 6px;
+  color: #526071;
+  font-size: 13px;
+}
+
+.calibration-confirm {
+  margin: 12px 0;
+}
+
+.calibration-measurement {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid #d6aa52;
+  border-radius: 6px;
+  background: #fff8e5;
+}
+
+.calibration-measurement[hidden] {
+  display: none;
+}
+
+.calibration-measurement label {
+  display: grid;
+  gap: 6px;
+  color: #667385;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.calibration-measurement button {
+  grid-column: 1 / -1;
+}
+
+.secondary-action {
+  margin-top: 12px;
 }
 
 .flow-control input {
@@ -334,6 +394,19 @@ h2 {
   display: flex;
   justify-content: flex-end;
   margin-top: 10px;
+}
+
+.timing-diagnostics {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid #d8dee5;
+}
+
+.timing-diagnostics .section-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .empty-state {

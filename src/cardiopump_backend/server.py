@@ -12,7 +12,6 @@ from typing import Any
 from .arduino import ArduinoSerialBridge
 from .constants import (
     CONSTANT_FLOW_FULL_SCALE_ML_S,
-    MAX_DAC_VOLTAGE,
     WAVEFORM_UPDATE_HZ,
     WAVEFORM_UPDATE_RATES,
 )
@@ -79,6 +78,7 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
             if self.path == "/api/start":
                 hardware = self._hardware_telemetry()
                 self._require_start_ready(hardware)
+                max_flow_ml_s = self._max_flow_ml_s(hardware)
                 self.controller.set_simulated_interlocks(
                     overpressure_latched=bool(hardware.get("pressure_latch_set")),
                     parker_relay_closed=bool(hardware.get("servo_ready")),
@@ -86,7 +86,7 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                 )
                 self.controller.set_constant_velocity(
                     (
-                        self.server.flow_ml_s / CONSTANT_FLOW_FULL_SCALE_ML_S
+                        self.server.flow_ml_s / max_flow_ml_s
                         if self.server.control_mode == "constant"
                         else 0.0
                     ),
@@ -97,9 +97,17 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                     if self.server.control_mode == "waveform":
                         if self.server.waveform_program is None:
                             raise RuntimeError("load a waveform before starting waveform mode")
+                        if (
+                            hardware.get("calibration_valid")
+                            and self.server.waveform_program.max_flow_ml_s > max_flow_ml_s
+                        ):
+                            raise RuntimeError(
+                                f"waveform exceeds calibrated maximum flow of {max_flow_ml_s:g} mL/s"
+                            )
                         self.arduino.load_waveform(
                             self.server.waveform_program.samples,
                             self.server.waveform_program.update_hz,
+                            self.server.waveform_program.max_flow_ml_s,
                         )
                         loaded = self.arduino.wait_for_wave_loaded(
                             len(self.server.waveform_program.samples)
@@ -111,8 +119,6 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                     else:
                         self.arduino.start_constant(
                             self.server.flow_ml_s
-                            / CONSTANT_FLOW_FULL_SCALE_ML_S
-                            * MAX_DAC_VOLTAGE
                         )
                 self.controller.start(now_s)
                 self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
@@ -139,6 +145,61 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                 if self.arduino is None:
                     raise RuntimeError("arduino serial bridge is disabled")
                 self.arduino.clear_fault()
+                self.arduino.request_telemetry()
+                time.sleep(0.05)
+                self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
+                return
+
+            if self.path == "/api/calibration/start":
+                if self.arduino is None:
+                    raise RuntimeError("arduino serial bridge is disabled")
+                payload = self._read_json()
+                voltage_mv = round(float(payload.get("voltage", 0)) * 1000)
+                self._require_start_ready(self._hardware_telemetry())
+                self.arduino.start_calibration(voltage_mv)
+                self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
+                return
+
+            if self.path == "/api/calibration/result":
+                if self.arduino is None:
+                    raise RuntimeError("arduino serial bridge is disabled")
+                payload = self._read_json()
+                voltage_mv = round(float(payload.get("voltage", 0)) * 1000)
+                if "mean_flow_ml_s" in payload:
+                    flow_ml_s = float(payload["mean_flow_ml_s"])
+                elif "volume_ml" in payload:
+                    flow_ml_s = float(payload["volume_ml"]) / 60.0
+                else:
+                    raise ValueError("mean flow or volume is required")
+                if not isfinite(flow_ml_s) or flow_ml_s <= 0.0:
+                    raise ValueError("calibration measurement must be positive")
+                self.arduino.save_calibration_result(voltage_mv, flow_ml_s)
+                self.arduino.request_telemetry()
+                time.sleep(0.05)
+                self.server.flow_ml_s = min(
+                    self.server.flow_ml_s,
+                    self._max_flow_ml_s(self._hardware_telemetry()),
+                )
+                self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
+                return
+
+            if self.path == "/api/calibration/clear":
+                if self.arduino is None:
+                    raise RuntimeError("arduino serial bridge is disabled")
+                self.arduino.clear_calibration()
+                self.arduino.request_telemetry()
+                time.sleep(0.05)
+                self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
+                return
+
+            if self.path == "/api/calibration/load":
+                if self.arduino is None:
+                    raise RuntimeError("arduino serial bridge is disabled")
+                payload = self._read_json()
+                flows = payload.get("flows_ml_s")
+                if not isinstance(flows, list) or len(flows) != 4:
+                    raise ValueError("flows_ml_s must contain four calibration values")
+                self.arduino.load_calibration(tuple(float(value) for value in flows))
                 self.arduino.request_telemetry()
                 time.sleep(0.05)
                 self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
@@ -182,17 +243,20 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                     self.server.control_mode = mode
                 if "flow_ml_s" in payload:
                     flow_ml_s = float(payload["flow_ml_s"])
-                    if not isfinite(flow_ml_s) or not 0.0 <= flow_ml_s <= CONSTANT_FLOW_FULL_SCALE_ML_S:
+                    max_flow_ml_s = self._max_flow_ml_s(self._hardware_telemetry())
+                    if not isfinite(flow_ml_s) or not 0.0 <= flow_ml_s <= max_flow_ml_s:
                         raise ValueError(
                             "flow_ml_s must be between 0.0 and "
-                            f"{CONSTANT_FLOW_FULL_SCALE_ML_S:g}"
+                            f"{max_flow_ml_s:g}"
                         )
                     self.server.flow_ml_s = flow_ml_s
                 if "flow_fraction" in payload:
                     flow_fraction = float(payload["flow_fraction"])
                     if not -1.0 <= flow_fraction <= 1.0:
                         raise ValueError("flow_fraction must be between -1.0 and 1.0")
-                    self.server.flow_ml_s = max(0.0, flow_fraction) * CONSTANT_FLOW_FULL_SCALE_ML_S
+                    self.server.flow_ml_s = max(0.0, flow_fraction) * self._max_flow_ml_s(
+                        self._hardware_telemetry()
+                    )
                 if "waveform_update_hz" in payload:
                     update_hz = int(payload["waveform_update_hz"])
                     if update_hz not in WAVEFORM_UPDATE_RATES:
@@ -310,13 +374,24 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
         self._send_json({"ok": False, "error": message}, status=status)
 
     def _telemetry(self, now_s: float) -> dict[str, object]:
-        telemetry = self.controller.telemetry(now_s)
         hardware = self._hardware_telemetry()
+        max_flow_ml_s = self._max_flow_ml_s(hardware)
+        if hardware.get("connected") and hardware.get("fresh") and (
+            hardware.get("fault_latched") or hardware.get("controlled_stop_active")
+        ):
+            self.controller.stop(now_s)
+        telemetry = self.controller.telemetry(now_s)
+        hardware_running = bool(
+            hardware.get("fresh")
+            and hardware.get("run_mode") in ("constant", "waveform", "calibration")
+        )
+        telemetry["running"] = bool(telemetry.get("running")) or hardware_running
         telemetry["hardware"] = hardware
         telemetry["control"] = {
             "mode": self.server.control_mode,
             "flow_ml_s": self.server.flow_ml_s,
-            "flow_fraction": self.server.flow_ml_s / CONSTANT_FLOW_FULL_SCALE_ML_S,
+            "flow_fraction": self.server.flow_ml_s / max_flow_ml_s,
+            "max_flow_ml_s": max_flow_ml_s,
             "trigger_high_ms": self.server.trigger_high_ms,
             "waveform_update_hz": self.server.waveform_update_hz,
             "waveform_update_rates": list(WAVEFORM_UPDATE_RATES),
@@ -330,11 +405,20 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
             running=bool(telemetry.get("running")),
             communication_ok=bool(telemetry.get("communication_ok")),
         )
-        if hardware.get("connected"):
+        if hardware.get("connected") and hardware.get("fresh"):
             telemetry["interlocks"]["overpressure_latched"] = bool(hardware.get("pressure_latch_set"))
             telemetry["interlocks"]["parker_relay_closed"] = bool(hardware.get("servo_ready"))
             telemetry["interlocks"]["arduino_relay_closed"] = bool(hardware.get("arduino_enable"))
         return telemetry
+
+    @staticmethod
+    def _max_flow_ml_s(hardware: dict[str, object]) -> float:
+        flows = hardware.get("calibration_flows_ml_s")
+        if hardware.get("calibration_valid") and isinstance(flows, list) and len(flows) == 4:
+            maximum = float(flows[-1])
+            if maximum > 0.0:
+                return maximum
+        return CONSTANT_FLOW_FULL_SCALE_ML_S
 
     def _hardware_telemetry(self) -> dict[str, object]:
         hardware = (
@@ -347,6 +431,16 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
     def _require_start_ready(self, hardware: dict[str, object]) -> None:
         if not hardware.get("connected"):
             raise RuntimeError("cannot start while Arduino is disconnected")
+        if not hardware.get("fresh"):
+            raise RuntimeError("cannot start with stale Arduino telemetry")
+        if not hardware.get("protocol_compatible"):
+            raise RuntimeError("cannot start with incompatible Arduino firmware protocol")
+        if not hardware.get("dac_ok"):
+            raise RuntimeError("cannot start while DAC communication is unavailable")
+        if hardware.get("fault_latched") or hardware.get("controlled_stop_active"):
+            raise RuntimeError("cannot start while an Arduino fault is active")
+        if hardware.get("run_mode") != "stopped" or hardware.get("wave_running"):
+            raise RuntimeError("cannot start while Arduino is already running")
         if hardware.get("pressure_latch_set"):
             raise RuntimeError("cannot start while overpressure latch is active")
         if not hardware.get("arduino_enable"):

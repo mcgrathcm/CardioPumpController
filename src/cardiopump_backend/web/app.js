@@ -5,8 +5,11 @@ const state = {
   busy: false,
   refreshRequestId: 0,
   disableConfirmUntilMs: 0,
+  heartbeatInFlight: false,
   activeTab: "flow",
   activeFlowMode: "constant",
+  calibrationVoltage: null,
+  calibrationClearConfirmUntilMs: 0,
 };
 
 const DISABLE_CONFIRM_WINDOW_MS = 4000;
@@ -36,9 +39,21 @@ const elements = {
   triggerHighMsInput: document.querySelector("#trigger-high-ms-input"),
   waveformRateSelect: document.querySelector("#waveform-rate-select"),
   calibrationStatus: document.querySelector("#calibration-status"),
+  calibrationPoints: document.querySelector("#calibration-points"),
+  calibrationConfirmInput: document.querySelector("#calibration-confirm-input"),
+  calibrationStartButton: document.querySelector("#calibration-start-button"),
+  calibrationMeasurement: document.querySelector("#calibration-measurement"),
+  calibrationMeasurementType: document.querySelector("#calibration-measurement-type"),
+  calibrationMeasurementValue: document.querySelector("#calibration-measurement-value"),
+  calibrationSaveButton: document.querySelector("#calibration-save-button"),
+  calibrationClearButton: document.querySelector("#calibration-clear-button"),
   mainEnableButton: document.querySelector("#main-enable-button"),
   mainStartButton: document.querySelector("#main-start-button"),
   clearFaultButton: document.querySelector("#clear-fault-button"),
+  timingStatus: document.querySelector("#timing-status"),
+  timingDetails: document.querySelector("#timing-details"),
+  watchdogStatus: document.querySelector("#watchdog-status"),
+  controllerDiagnostics: document.querySelector("#controller-diagnostics"),
   controlMessage: document.querySelector("#control-message"),
 };
 
@@ -103,7 +118,10 @@ function formatFaultReason(reason) {
 
 function renderStatusBadges(telemetry) {
   const hardware = telemetry.hardware || {};
-  const hardwareConnected = hardware.connected === true;
+  const hardwareConnected =
+    hardware.connected === true &&
+    hardware.fresh === true &&
+    hardware.protocol_compatible === true;
   const connectionLost = !hardwareConnected && state.hadConnection;
   const system = telemetry.system || {};
   const systemState = system.state || (hardwareConnected ? "disabled" : "disconnected");
@@ -118,6 +136,9 @@ function renderStatusBadges(telemetry) {
     running: "ok",
     stopped: "neutral",
     disabled: "neutral",
+    stopping: "warning",
+    starting: "warning",
+    calibrating: "warning",
     fault: "bad flash",
     disconnected: "bad",
   }[systemState] || "neutral";
@@ -158,6 +179,9 @@ function canStart(telemetry) {
     telemetry.system?.state === "stopped" &&
     telemetry.running !== true &&
     hardware.connected === true &&
+    hardware.fresh === true &&
+    hardware.protocol_compatible === true &&
+    hardware.dac_ok === true &&
     hardware.arduino_enable === true &&
     hardware.servo_ready === true &&
     hardware.pressure_latch_set !== true
@@ -178,11 +202,19 @@ function renderTelemetry(telemetry) {
   renderStatusBadges(telemetry);
 
   const hardware = telemetry.hardware || {};
+  const hardwareConnected =
+    hardware.connected === true &&
+    hardware.fresh === true &&
+    hardware.protocol_compatible === true;
   const control = telemetry.control || {};
   const running = telemetry.running === true;
   const arduinoEnabled = hardware.arduino_enable === true;
   const system = telemetry.system || {};
   const faulted = system.state === "fault";
+  const stopping = system.state === "stopping";
+  const starting = system.state === "starting";
+  const calibrating = system.state === "calibrating";
+  const controlsLocked = faulted || stopping || starting || calibrating;
   if (!running || !arduinoEnabled || Date.now() > state.disableConfirmUntilMs) {
     state.disableConfirmUntilMs = 0;
   }
@@ -194,21 +226,24 @@ function renderTelemetry(telemetry) {
   if (waveformAvailable || waveformMode || state.activeFlowMode !== "waveform") {
     setActiveFlowMode(waveformMode ? "waveform" : "constant");
   }
-  elements.constantModeButton.disabled = running || state.busy || faulted;
-  elements.waveformModeButton.disabled = running || state.busy || faulted;
+  elements.constantModeButton.disabled = running || state.busy || controlsLocked;
+  elements.waveformModeButton.disabled = running || state.busy || controlsLocked;
   if (document.activeElement !== elements.flowInput && Number.isFinite(Number(control.flow_ml_s))) {
     elements.flowInput.value = Number(control.flow_ml_s).toFixed(2);
   }
-  elements.flowInput.disabled = waveformMode || running || state.busy || hardware.connected !== true || faulted;
-  elements.waveformFile.disabled = running || state.busy || faulted;
-  elements.waveformMaxFlowInput.disabled = running || state.busy || !waveformAvailable || faulted;
-  elements.waveformPeriodInput.disabled = running || state.busy || !waveformAvailable || faulted;
-  elements.clipNegativeFlowInput.disabled = running || state.busy || !waveformAvailable || faulted;
-  elements.resetWaveformDefaultsButton.disabled = running || state.busy || !waveformAvailable || faulted;
+  if (Number.isFinite(Number(control.max_flow_ml_s))) {
+    elements.flowInput.max = String(control.max_flow_ml_s);
+  }
+  elements.flowInput.disabled = waveformMode || running || state.busy || !hardwareConnected || controlsLocked;
+  elements.waveformFile.disabled = running || state.busy || controlsLocked;
+  elements.waveformMaxFlowInput.disabled = running || state.busy || !waveformAvailable || controlsLocked;
+  elements.waveformPeriodInput.disabled = running || state.busy || !waveformAvailable || controlsLocked;
+  elements.clipNegativeFlowInput.disabled = running || state.busy || !waveformAvailable || controlsLocked;
+  elements.resetWaveformDefaultsButton.disabled = running || state.busy || !waveformAvailable || controlsLocked;
   if (document.activeElement !== elements.waveformRateSelect && Number.isFinite(Number(control.waveform_update_hz))) {
     elements.waveformRateSelect.value = String(control.waveform_update_hz);
   }
-  elements.waveformRateSelect.disabled = running || state.busy || faulted;
+  elements.waveformRateSelect.disabled = running || state.busy || controlsLocked;
   if (document.activeElement !== elements.waveformMaxFlowInput && Number.isFinite(Number(waveform?.max_flow_ml_s))) {
     elements.waveformMaxFlowInput.value = Number(waveform.max_flow_ml_s).toFixed(2);
   }
@@ -228,7 +263,7 @@ function renderTelemetry(telemetry) {
   if (document.activeElement !== elements.triggerHighMsInput && Number.isFinite(triggerHighMs)) {
     elements.triggerHighMsInput.value = triggerHighMs.toFixed(1);
   }
-  elements.triggerHighMsInput.disabled = running || state.busy || faulted;
+  elements.triggerHighMsInput.disabled = running || state.busy || controlsLocked;
   elements.waveformStatus.textContent = waveformAvailable && waveform
     ? `${waveform.sample_count} samples at ${waveform.update_hz} Hz, ${Number(waveform.period_ms).toFixed(0)} ms, `
       + `flow scale ${Number(waveform.flow_scale).toFixed(2)}, period scale ${Number(waveform.period_scale).toFixed(2)}, `
@@ -249,35 +284,162 @@ function renderTelemetry(telemetry) {
     elements.waveformRasterNote.hidden = true;
     elements.waveformRasterNote.textContent = "";
   }
-  elements.calibrationStatus.textContent = waveform?.calibration === "linear_full_scale"
-    ? "Linear full-scale fallback"
-    : waveform?.calibration || "Not configured";
+  renderCalibration(hardware, telemetry);
   drawWaveform(waveform);
 
-  elements.mainEnableButton.textContent = faulted
+  renderTimingDiagnostics(hardware, running && waveformMode);
+  renderControllerDiagnostics(hardware);
+
+  elements.mainEnableButton.textContent = stopping
+    ? "Stopping"
+    : faulted
     ? "Fault Latched"
     : disablePending
     ? "Confirm Disable"
     : arduinoEnabled ? "Disable" : "Enable";
-  elements.mainEnableButton.className = faulted
+  elements.mainEnableButton.className = controlsLocked
     ? "big-button disabled"
     : arduinoEnabled ? "big-button danger" : "big-button enable";
-  elements.clearFaultButton.disabled = !faulted || state.busy || hardware.connected !== true;
+  elements.clearFaultButton.disabled =
+    !faulted || state.busy || !hardwareConnected
+    || (hardware.fault_clear_ready !== true && hardware.fault_code !== "dac_communication");
+  elements.clearFaultButton.title = faulted && hardware.fault_clear_ready !== true
+    ? "Interlocks must remain safe for 250 ms before clearing"
+    : "";
 
-  elements.mainStartButton.textContent = running ? "Stop" : "Start";
-  elements.mainStartButton.className = running
+  elements.mainStartButton.textContent = stopping
+    ? "Stopping"
+    : calibrating
+    ? "Stop Calibration"
+    : starting
+    ? "Stop Ramp"
+    : running ? "Stop" : "Start";
+  elements.mainStartButton.className = stopping
+    ? "big-button disabled"
+    : running
     ? "big-button danger"
     : canStart(telemetry)
       ? "big-button start"
       : "big-button disabled";
-  elements.mainStartButton.disabled = !running && !canStart(telemetry);
+  elements.mainStartButton.disabled = stopping || (!running && !canStart(telemetry));
 
-  setControlsEnabled(hardware.connected === true && !state.busy && !faulted);
+  setControlsEnabled(hardwareConnected && !state.busy && !controlsLocked);
 
-  if (faulted && !state.busy) {
+  if (stopping && !state.busy) {
+    elements.controlMessage.textContent = `Controlled stop: ${formatFaultReason(system.reason)}`;
+    elements.controlMessage.className = "message error";
+  } else if (faulted && !state.busy) {
     elements.controlMessage.textContent = `Fault: ${formatFaultReason(system.reason)}`;
     elements.controlMessage.className = "message error";
   }
+}
+
+function renderCalibration(hardware, telemetry) {
+  const voltages = [2.5, 5, 7.5, 10];
+  const flows = hardware.calibration_flows_ml_s || [0, 0, 0, 0];
+  const validMask = Number(hardware.calibration_valid_mask) || 0;
+  const active = hardware.run_mode === "calibration" || hardware.calibration_active === true;
+  const complete = hardware.calibration_complete === true;
+  const nextIndex = voltages.findIndex((_, index) => (validMask & (1 << index)) === 0);
+  const targetIndex = nextIndex < 0 ? 0 : nextIndex;
+  const targetVoltage = voltages[targetIndex];
+
+  elements.calibrationPoints.replaceChildren(...voltages.map((voltage, index) => {
+    const row = document.createElement("div");
+    row.className = "calibration-point";
+    const measured = (validMask & (1 << index)) !== 0;
+    row.innerHTML = `<span>${voltage.toFixed(1)} V</span><span>${measured
+      ? `${Number(flows[index]).toFixed(4)} mL/s`
+      : "Not measured"}</span>`;
+    return row;
+  }));
+
+  if (active) {
+    elements.calibrationStatus.textContent = `Running: ${formatFaultReason(hardware.calibration_stage)}`;
+  } else if (complete) {
+    elements.calibrationStatus.textContent = "Measurement required";
+  } else if (hardware.calibration_valid === true) {
+    elements.calibrationStatus.textContent = "4-point calibration active";
+  } else {
+    elements.calibrationStatus.textContent = `${validMask.toString(2).split("1").length - 1}/4 points`;
+  }
+
+  elements.calibrationStartButton.textContent = `Start ${targetVoltage.toFixed(1)} V Point`;
+  elements.calibrationStartButton.disabled =
+    nextIndex < 0 || active || complete || state.busy
+    || !elements.calibrationConfirmInput.checked || !canStart(telemetry);
+  elements.calibrationConfirmInput.disabled = active || complete || state.busy || nextIndex < 0;
+  elements.calibrationMeasurement.hidden = !complete;
+  elements.calibrationSaveButton.disabled = state.busy || !complete;
+  elements.calibrationClearButton.disabled = state.busy || active || validMask === 0;
+  if (Date.now() > state.calibrationClearConfirmUntilMs) {
+    state.calibrationClearConfirmUntilMs = 0;
+    elements.calibrationClearButton.textContent = "Clear Calibration";
+  }
+  if (complete && Number(hardware.calibration_target_mv) > 0) {
+    state.calibrationVoltage = Number(hardware.calibration_target_mv) / 1000;
+  }
+}
+
+function renderControllerDiagnostics(hardware) {
+  if (hardware.connected !== true || hardware.fresh !== true) {
+    setPill(elements.watchdogStatus, "Watchdog Unknown", "neutral");
+    elements.controllerDiagnostics.textContent = "No current controller diagnostics.";
+    return;
+  }
+  setPill(
+    elements.watchdogStatus,
+    hardware.watchdog_ok ? "Watchdog Active" : "Watchdog Fault",
+    hardware.watchdog_ok ? "ok" : "bad",
+  );
+  elements.controllerDiagnostics.textContent =
+    `Reset: ${formatFaultReason(hardware.reset_cause)}; retained fault: `
+    + `${formatFaultReason(hardware.retained_last_fault)} (${Number(hardware.retained_fault_count) || 0} total). `
+    + `Heartbeat age/max gap: ${Number(hardware.heartbeat_age_ms) || 0}/`
+    + `${Number(hardware.heartbeat_max_gap_ms) || 0} ms. `
+    + `Ramp updates/missed/max late: ${Number(hardware.ramp_update_count) || 0}/`
+    + `${Number(hardware.ramp_missed_deadline_count) || 0}/`
+    + `${Number(hardware.ramp_max_lateness_us) || 0} us. `
+    + `Serial overflows: ${Number(hardware.serial_overflow_count) || 0}; `
+    + `protocol errors: ${Number(hardware.protocol_error_count) || 0}; `
+    + `DAC write failures: ${Number(hardware.dac_write_failure_count) || 0}.`;
+}
+
+function renderTimingDiagnostics(hardware, active) {
+  if (
+    hardware.connected !== true ||
+    hardware.fresh !== true ||
+    hardware.protocol_compatible !== true
+  ) {
+    setPill(elements.timingStatus, "Timing Unknown", "neutral");
+    elements.timingDetails.textContent = "No current waveform timing data.";
+    return;
+  }
+
+  const faultCode = hardware.fault_code;
+  const controlledStopCode = hardware.controlled_stop_code;
+  const warnings = Number(hardware.timing_warning_count) || 0;
+  const overruns = Number(hardware.timing_overrun_count) || 0;
+  const timingFault = faultCode === "timing_overrun" || controlledStopCode === "timing_overrun";
+
+  if (timingFault || overruns > 0) {
+    setPill(elements.timingStatus, "Timing Overrun", "bad flash");
+  } else if (warnings > 0) {
+    setPill(elements.timingStatus, "Timing Warning", "warning");
+  } else if (active) {
+    setPill(elements.timingStatus, "Timing Active", "ok");
+  } else {
+    setPill(elements.timingStatus, "Timing Idle", "neutral");
+  }
+
+  const lateness = Number(hardware.timing_lateness_us) || 0;
+  const maxLateness = Number(hardware.timing_max_lateness_us) || 0;
+  const writeTime = Number(hardware.timing_write_us) || 0;
+  const maxWriteTime = Number(hardware.timing_max_write_us) || 0;
+  elements.timingDetails.textContent =
+    `Scheduler lateness ${lateness} us (max ${maxLateness} us); `
+    + `DAC write ${writeTime} us (max ${maxWriteTime} us); `
+    + `${warnings} warnings; ${overruns} overruns.`;
 }
 
 function renderDisconnected(error) {
@@ -305,6 +467,14 @@ function renderDisconnected(error) {
   elements.waveformRateSelect.disabled = true;
   elements.waveformRasterNote.hidden = true;
   elements.calibrationStatus.textContent = "Not configured";
+  elements.calibrationStartButton.disabled = true;
+  elements.calibrationSaveButton.disabled = true;
+  elements.calibrationClearButton.disabled = true;
+  elements.calibrationMeasurement.hidden = true;
+  setPill(elements.timingStatus, "Timing Unknown", "neutral");
+  elements.timingDetails.textContent = "No waveform timing data.";
+  setPill(elements.watchdogStatus, "Watchdog Unknown", "neutral");
+  elements.controllerDiagnostics.textContent = "No controller diagnostics.";
   drawWaveform(null);
   setControlsEnabled(false);
 }
@@ -400,10 +570,16 @@ async function refreshTelemetry() {
 }
 
 async function sendHeartbeat() {
+  if (state.heartbeatInFlight) {
+    return;
+  }
+  state.heartbeatInFlight = true;
   try {
     await postJson("/api/heartbeat");
   } catch {
     state.connected = false;
+  } finally {
+    state.heartbeatInFlight = false;
   }
 }
 
@@ -591,8 +767,89 @@ async function clearFault() {
   }
 }
 
+async function startCalibration() {
+  const validMask = Number(state.telemetry?.hardware?.calibration_valid_mask) || 0;
+  const voltages = [2.5, 5, 7.5, 10];
+  const index = voltages.findIndex((_, pointIndex) => (validMask & (1 << pointIndex)) === 0);
+  if (index < 0 || !elements.calibrationConfirmInput.checked) {
+    return;
+  }
+
+  state.busy = true;
+  state.calibrationVoltage = voltages[index];
+  try {
+    const payload = await postJson("/api/calibration/start", { voltage: voltages[index] });
+    renderTelemetry(payload.telemetry);
+    elements.controlMessage.textContent =
+      `Calibration at ${voltages[index].toFixed(1)} V started; the Arduino owns the timed run.`;
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function saveCalibrationMeasurement() {
+  const value = Number(elements.calibrationMeasurementValue.value);
+  const voltage = state.calibrationVoltage
+    || Number(state.telemetry?.hardware?.calibration_target_mv) / 1000;
+  if (!Number.isFinite(value) || value <= 0 || !Number.isFinite(voltage)) {
+    elements.controlMessage.textContent = "Enter a positive calibration measurement.";
+    elements.controlMessage.className = "message error";
+    return;
+  }
+
+  state.busy = true;
+  try {
+    const measurementType = elements.calibrationMeasurementType.value;
+    const payload = await postJson("/api/calibration/result", {
+      voltage,
+      [measurementType]: value,
+    });
+    elements.calibrationMeasurementValue.value = "";
+    elements.calibrationConfirmInput.checked = false;
+    state.calibrationVoltage = null;
+    renderTelemetry(payload.telemetry);
+    elements.controlMessage.textContent = "Calibration point saved in the Arduino.";
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function clearCalibration() {
+  if (Date.now() > state.calibrationClearConfirmUntilMs) {
+    state.calibrationClearConfirmUntilMs = Date.now() + DISABLE_CONFIRM_WINDOW_MS;
+    elements.calibrationClearButton.textContent = "Confirm Clear Calibration";
+    return;
+  }
+  state.calibrationClearConfirmUntilMs = 0;
+  state.busy = true;
+  try {
+    const payload = await postJson("/api/calibration/clear");
+    elements.calibrationClearButton.textContent = "Clear Calibration";
+    elements.calibrationConfirmInput.checked = false;
+    renderTelemetry(payload.telemetry);
+    elements.controlMessage.textContent = "Arduino calibration cleared.";
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
 async function toggleMainEnable() {
-  if (state.telemetry?.system?.state === "fault") {
+  if (["fault", "stopping"].includes(state.telemetry?.system?.state)) {
     return;
   }
   const running = state.telemetry?.running === true;
@@ -668,6 +925,14 @@ elements.mainEnableButton.addEventListener("click", toggleMainEnable);
 elements.mainStartButton.addEventListener("click", toggleStartStop);
 elements.overpressureStatus.addEventListener("click", resetPressureLatch);
 elements.clearFaultButton.addEventListener("click", clearFault);
+elements.calibrationConfirmInput.addEventListener("change", () => {
+  if (state.telemetry) {
+    renderCalibration(state.telemetry.hardware || {}, state.telemetry);
+  }
+});
+elements.calibrationStartButton.addEventListener("click", startCalibration);
+elements.calibrationSaveButton.addEventListener("click", saveCalibrationMeasurement);
+elements.calibrationClearButton.addEventListener("click", clearCalibration);
 elements.tabButtons.forEach((button) => {
   button.addEventListener("click", () => setActiveTab(button.dataset.tab));
 });

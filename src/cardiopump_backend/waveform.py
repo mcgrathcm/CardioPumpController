@@ -36,7 +36,7 @@ class WaveformProgram:
 
     @property
     def default_period_ms(self) -> float:
-        return _round_period_to_raster(self.source_duration_ms, self.update_hz)
+        return round_to_raster_ms(self.source_duration_ms, self.update_hz)
 
     @property
     def default_period_scale(self) -> float:
@@ -73,6 +73,21 @@ class WaveformProgram:
             for flow in self._commanded_flows()
         )
 
+    def samples_with_flow_limit(self, max_flow_ml_s: float) -> tuple[int, ...]:
+        applied_max_flow_ml_s = self.applied_max_flow_ml_s(max_flow_ml_s)
+        flows = self._flows_with_limit(max_flow_ml_s)
+        if applied_max_flow_ml_s == 0.0:
+            return tuple(0 for _ in flows)
+        return tuple(
+            _flow_to_q15(flow / applied_max_flow_ml_s)
+            for flow in flows
+        )
+
+    def applied_max_flow_ml_s(self, max_flow_ml_s: float) -> float:
+        if not isfinite(max_flow_ml_s) or max_flow_ml_s < 0.0:
+            raise ValueError("maximum flow limit must be non-negative")
+        return min(self.max_flow_ml_s, max_flow_ml_s)
+
     @property
     def clipped_sample_count(self) -> int:
         return sum(
@@ -89,16 +104,7 @@ class WaveformProgram:
 
     @property
     def total_stroke_volume_ml(self) -> float:
-        flows = self._commanded_flows()
-        if not flows:
-            return 0.0
-
-        # Total displaced volume counts reverse flow by magnitude.
-        dt_s = 1.0 / self.update_hz
-        return sum(
-            (abs(flows[index]) + abs(flows[(index + 1) % len(flows)])) * 0.5 * dt_s
-            for index in range(len(flows))
-        )
+        return _stroke_volume_ml(self._commanded_flows(), self.update_hz)
 
     def with_settings(self, max_flow_ml_s: float, period_ms: float) -> WaveformProgram:
         if not isfinite(max_flow_ml_s) or max_flow_ml_s < 0.0:
@@ -142,7 +148,7 @@ class WaveformProgram:
 
     def with_update_hz(self, update_hz: int) -> WaveformProgram:
         _validate_update_hz(update_hz)
-        period_ms = _round_period_to_raster(self.period_ms, update_hz)
+        period_ms = round_to_raster_ms(self.period_ms, update_hz)
         program = WaveformProgram(
             points=self.points,
             update_hz=update_hz,
@@ -167,9 +173,23 @@ class WaveformProgram:
     def reset_scaling(self) -> WaveformProgram:
         return self.with_scaling(1.0, self.default_period_scale)
 
-    def to_json(self) -> dict[str, object]:
-        scaled_flows = self._commanded_flows()
-        preview = self._preview_points(scaled_flows)
+    def to_json(self, max_flow_limit_ml_s: float | None = None) -> dict[str, object]:
+        requested_flows = self._commanded_flows()
+        if max_flow_limit_ml_s is None:
+            applied_max_flow_ml_s = self.max_flow_ml_s
+            scaled_flows = requested_flows
+        else:
+            applied_max_flow_ml_s = self.applied_max_flow_ml_s(max_flow_limit_ml_s)
+            scaled_flows = self._flows_with_limit(max_flow_limit_ml_s)
+        clipped_sample_count = sum(
+            requested != applied
+            for requested, applied in zip(requested_flows, scaled_flows, strict=True)
+        )
+        preview = self._preview_points(
+            scaled_flows,
+            requested_flows,
+            applied_max_flow_ml_s,
+        )
         return {
             "source_point_count": len(self.points),
             "source_duration_ms": self.source_duration_ms,
@@ -183,6 +203,8 @@ class WaveformProgram:
             "flow_scale": self.flow_scale,
             "period_scale": self.period_scale,
             "max_flow_ml_s": self.max_flow_ml_s,
+            "applied_max_flow_ml_s": applied_max_flow_ml_s,
+            "flow_limit_ml_s": max_flow_limit_ml_s,
             "period_ms": self.period_ms,
             "raster_period_ms": self.raster_period_ms,
             "period_is_raster_aligned": _is_raster_multiple(self.period_ms, self.update_hz),
@@ -191,10 +213,10 @@ class WaveformProgram:
             "duration_s": self.duration_s,
             "min_flow_ml_s": min(point["flow_ml_s"] for point in preview),
             "max_flow_ml_s_preview": max(point["flow_ml_s"] for point in preview),
-            "clipped_sample_count": self.clipped_sample_count,
+            "clipped_sample_count": clipped_sample_count,
             "clip_negative_flow": self.clip_negative_flow,
             "negative_clipped_sample_count": self.negative_clipped_sample_count,
-            "total_stroke_volume_ml": self.total_stroke_volume_ml,
+            "total_stroke_volume_ml": _stroke_volume_ml(scaled_flows, self.update_hz),
             "calibration": "firmware_managed",
             "preview": preview,
         }
@@ -216,6 +238,14 @@ class WaveformProgram:
             return flows
         return tuple(max(0.0, flow) for flow in flows)
 
+    def _flows_with_limit(self, max_flow_ml_s: float) -> tuple[float, ...]:
+        if not isfinite(max_flow_ml_s) or max_flow_ml_s < 0.0:
+            raise ValueError("maximum flow limit must be non-negative")
+        return tuple(
+            max(-max_flow_ml_s, min(max_flow_ml_s, flow))
+            for flow in self._commanded_flows()
+        )
+
     def _flow_to_drive_fraction(self, flow_ml_s: float, *, clip: bool = True) -> float:
         # Q15 preserves waveform shape; firmware applies calibration or its conservative fallback.
         max_flow = self.max_flow_ml_s
@@ -225,23 +255,26 @@ class WaveformProgram:
     def _preview_points(
         self,
         scaled_flows: tuple[float, ...],
+        requested_flows: tuple[float, ...],
+        applied_max_flow_ml_s: float,
         max_points: int = 500,
     ) -> list[dict[str, float | bool]]:
         step = max(1, len(scaled_flows) // max_points)
         points: list[dict[str, float | bool]] = []
         for index in range(0, len(scaled_flows), step):
             flow = scaled_flows[index]
-            drive_fraction = self._flow_to_drive_fraction(flow, clip=False)
-            clipped_drive_fraction = max(-1.0, min(1.0, drive_fraction))
-            clipped_flow = clipped_drive_fraction * self.max_flow_ml_s
+            drive_fraction = (
+                0.0 if applied_max_flow_ml_s == 0.0
+                else flow / applied_max_flow_ml_s
+            )
             points.append(
                 {
                     "time_ms": index * 1000.0 / self.update_hz,
                     "time_s": index / self.update_hz,
-                    "flow_ml_s": clipped_flow,
-                    "flow": clipped_flow,
-                    "drive_fraction": clipped_drive_fraction,
-                    "clipped": abs(drive_fraction) > 1.0,
+                    "flow_ml_s": flow,
+                    "flow": flow,
+                    "drive_fraction": drive_fraction,
+                    "clipped": flow != requested_flows[index],
                 }
             )
         return points
@@ -258,7 +291,7 @@ def program_from_text(
         raise ValueError("max_samples must be positive")
     points = tuple(_parse_points(text))
     source_duration_ms = points[-1].time_ms
-    default_period_ms = _round_period_to_raster(source_duration_ms, update_hz)
+    default_period_ms = round_to_raster_ms(source_duration_ms, update_hz)
     program = WaveformProgram(
         points=points,
         update_hz=update_hz,
@@ -330,12 +363,23 @@ def _flow_to_q15(flow_fraction: float) -> int:
     return max(-32767, min(32767, round(flow_fraction * 32767)))
 
 
+def _stroke_volume_ml(flows: tuple[float, ...], update_hz: int) -> float:
+    if not flows:
+        return 0.0
+    # Total displaced volume counts reverse flow by magnitude.
+    dt_s = 1.0 / update_hz
+    return sum(
+        (abs(flows[index]) + abs(flows[(index + 1) % len(flows)])) * 0.5 * dt_s
+        for index in range(len(flows))
+    )
+
+
 def _validate_update_hz(update_hz: int) -> None:
     if update_hz <= 0:
         raise ValueError("update_hz must be positive")
 
 
-def _round_period_to_raster(period_ms: float, update_hz: int) -> float:
+def round_to_raster_ms(period_ms: float, update_hz: int) -> float:
     raster_ms = 1000.0 / update_hz
     return max(raster_ms, floor(period_ms / raster_ms + 0.5) * raster_ms)
 

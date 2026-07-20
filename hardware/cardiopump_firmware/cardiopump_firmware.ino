@@ -33,6 +33,7 @@ constexpr uint8_t ProtocolVersion = 4;
 constexpr uint8_t CalibrationPointCount = 4;
 constexpr uint16_t CalibrationVoltagesMv[CalibrationPointCount] = {2500, 5000, 7500, 10000};
 constexpr uint16_t UncalibratedMaxMillivolts = 2500;
+constexpr uint32_t UncalibratedMaxFlowUlS = 1000000UL;
 constexpr uint32_t RetainedMagic = 0x43415244UL;
 constexpr uint8_t RetainedVersion = 2;
 
@@ -138,6 +139,9 @@ unsigned long serialOverflowCount = 0;
 unsigned long protocolErrorCount = 0;
 unsigned long dacWriteFailureCount = 0;
 unsigned long heartbeatMaxGapMs = 0;
+char heartbeatAckBuffer[48] = {};
+uint8_t heartbeatAckLength = 0;
+uint8_t heartbeatAckOffset = 0;
 bool faultClearDwellTracking = false;
 unsigned long faultClearSafeSinceMs = 0;
 bool watchdogOk = false;
@@ -188,16 +192,16 @@ void setup() {
 
 void loop() {
   static unsigned long lastTelemetryMs = 0;
-  unsigned long nowMs = millis();
-  unsigned long nowUs = micros();
 
   readSerialCommands();
+  flushHeartbeatAck();
+  unsigned long nowMs = millis();
   enforceSafety(nowMs);
   updateFaultClearDwell(nowMs);
-  updateRampUp(nowUs);
-  updateCalibration(nowUs);
-  updateRampDown(nowUs);
-  updateTrigger(nowUs);
+  updateRampUp(micros());
+  updateCalibration(micros());
+  updateRampDown(micros());
+  updateTrigger(micros());
   if (!rampUpActive && !rampDownActive) {
     updateWaveform();
   }
@@ -411,6 +415,7 @@ void handleCommand(char *rawCommand) {
   if (strncmp(command, "WAVE_DATA ", 10) == 0) {
     if (appendWaveformData(command + 10)) {
       acceptHostCommand();
+      sendCommandAck("action=wave_data");
     }
     return;
   }
@@ -523,8 +528,10 @@ bool beginWaveformLoad(char *payload) {
     sendCommandError("wave_begin_range");
     return false;
   }
-  if (calibrationValid()
-      && requestedPeakFlow > calibrationFlowUlS[CalibrationPointCount - 1]) {
+  uint32_t maxFlowUlS = calibrationValid()
+    ? calibrationFlowUlS[CalibrationPointCount - 1]
+    : UncalibratedMaxFlowUlS;
+  if (requestedPeakFlow > maxFlowUlS) {
     sendCommandError("flow_out_of_calibration");
     return false;
   }
@@ -809,12 +816,6 @@ bool writeTimedWaveformSample(int16_t sample, unsigned long writeStartedUs) {
 }
 
 int waveformSampleMillivolts(int16_t sample) {
-  if (!calibrationValid()) {
-    return static_cast<int>(
-      (static_cast<long>(sample) * UncalibratedMaxMillivolts) / 32767L
-    );
-  }
-
   uint32_t magnitude = sample < 0
     ? static_cast<uint32_t>(-static_cast<long>(sample))
     : static_cast<uint32_t>(sample);
@@ -823,7 +824,7 @@ int waveformSampleMillivolts(int16_t sample) {
   );
   int millivolts = 0;
   if (!flowToMillivolts(flowUlS, millivolts)) {
-    return sample < 0 ? -10000 : 10000;
+    return 0;
   }
   return sample < 0 ? -millivolts : millivolts;
 }
@@ -996,11 +997,12 @@ bool calibrationValid() {
 
 bool flowToMillivolts(uint32_t flowUlS, int &millivolts) {
   if (!calibrationValid()) {
-    if (flowUlS > 1000000UL) {
+    if (flowUlS > UncalibratedMaxFlowUlS) {
       return false;
     }
     millivolts = static_cast<int>(
-      (static_cast<unsigned long long>(flowUlS) * UncalibratedMaxMillivolts) / 1000000UL
+      (static_cast<unsigned long long>(flowUlS) * UncalibratedMaxMillivolts)
+      / UncalibratedMaxFlowUlS
     );
     return true;
   }
@@ -1544,51 +1546,47 @@ void sendCommandError(const char *code) {
 }
 
 void sendHeartbeatAck() {
+  if (heartbeatAckLength != 0) {
+    return;
+  }
   char mode = runMode == RunWaveform ? 'w'
     : (runMode == RunConstant ? 'c' : (runMode == RunCalibration ? 'k' : 's'));
-  char response[96];
-  int length = 0;
-  if (commandSequenced) {
-    length = snprintf(
-      response,
-      sizeof(response),
-      "ACK seq=%lu v=%u m=%c f=%u s=%u u=%u n=%u g=%u d=%u w=%u e=%u r=%u p=%u\n",
-      commandSequence,
-      ProtocolVersion,
-      mode,
-      faultLatched ? 1 : 0,
-      controlledStopActive ? 1 : 0,
-      rampUpActive ? 1 : 0,
-      rampDownActive ? 1 : 0,
-      static_cast<unsigned int>(calibrationStage),
-      dacPresent ? 1 : 0,
-      waveformRunning ? 1 : 0,
-      digitalRead(ArduinoEnablePin) == LOW ? 1 : 0,
-      digitalRead(ServoReadyPin) == LOW ? 1 : 0,
-      digitalRead(PressureLatchPin) == LOW ? 1 : 0
-    );
-  } else {
-    length = snprintf(
-      response,
-      sizeof(response),
-      "ACK v=%u m=%c f=%u s=%u u=%u n=%u g=%u d=%u w=%u e=%u r=%u p=%u\n",
-      ProtocolVersion,
-      mode,
-      faultLatched ? 1 : 0,
-      controlledStopActive ? 1 : 0,
-      rampUpActive ? 1 : 0,
-      rampDownActive ? 1 : 0,
-      static_cast<unsigned int>(calibrationStage),
-      dacPresent ? 1 : 0,
-      waveformRunning ? 1 : 0,
-      digitalRead(ArduinoEnablePin) == LOW ? 1 : 0,
-      digitalRead(ServoReadyPin) == LOW ? 1 : 0,
-      digitalRead(PressureLatchPin) == LOW ? 1 : 0
-    );
+  int length = snprintf(
+    heartbeatAckBuffer,
+    sizeof(heartbeatAckBuffer),
+    "HB4 %c %u %u %u %u %u %u %u %u %u %u %d\n",
+    mode,
+    faultLatched ? 1 : 0,
+    controlledStopActive ? 1 : 0,
+    rampUpActive ? 1 : 0,
+    rampDownActive ? 1 : 0,
+    static_cast<unsigned int>(calibrationStage),
+    dacPresent ? 1 : 0,
+    waveformRunning ? 1 : 0,
+    digitalRead(ArduinoEnablePin) == LOW ? 1 : 0,
+    digitalRead(ServoReadyPin) == LOW ? 1 : 0,
+    digitalRead(PressureLatchPin) == LOW ? 1 : 0,
+    dacMillivolts
+  );
+  heartbeatAckLength = length > 0 && length < static_cast<int>(sizeof(heartbeatAckBuffer))
+    ? static_cast<uint8_t>(length)
+    : 0;
+  heartbeatAckOffset = 0;
+}
+
+void flushHeartbeatAck() {
+  if (heartbeatAckLength == 0 || !Serial) {
+    return;
   }
-  if (length > 0 && length < static_cast<int>(sizeof(response))
-      && Serial.availableForWrite() >= length) {
-    Serial.write(reinterpret_cast<const uint8_t *>(response), length);
+  uint8_t remaining = heartbeatAckLength - heartbeatAckOffset;
+  size_t written = Serial.write(
+    reinterpret_cast<const uint8_t *>(heartbeatAckBuffer + heartbeatAckOffset),
+    remaining
+  );
+  heartbeatAckOffset += static_cast<uint8_t>(written);
+  if (heartbeatAckOffset == heartbeatAckLength) {
+    heartbeatAckLength = 0;
+    heartbeatAckOffset = 0;
   }
 }
 

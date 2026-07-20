@@ -44,7 +44,7 @@ class ArduinoTelemetryTests(unittest.TestCase):
         self.assertTrue(telemetry["watchdog_ok"])
         self.assertEqual(telemetry["reset_cause"], "watchdog")
 
-    def test_compact_heartbeat_ack_refreshes_and_updates_runtime_state(self):
+    def test_compact_heartbeat_refreshes_and_updates_runtime_state(self):
         bridge = object.__new__(ArduinoSerialBridge)
         bridge._lock = threading.Lock()
         bridge._response_condition = threading.Condition(bridge._lock)
@@ -52,7 +52,7 @@ class ArduinoTelemetryTests(unittest.TestCase):
         bridge._pending_sequences = set()
         bridge._responses = {}
 
-        bridge._handle_line("ACK seq=7 v=4 m=w f=0 s=0 u=1 n=0 g=1 d=1 w=1 e=1 r=1 p=0")
+        bridge._handle_line("HB4 w 0 0 1 0 1 1 1 1 1 0 250")
 
         telemetry = bridge.telemetry()
         self.assertTrue(telemetry["fresh"])
@@ -62,6 +62,7 @@ class ArduinoTelemetryTests(unittest.TestCase):
         self.assertTrue(telemetry["arduino_enable"])
         self.assertTrue(telemetry["servo_ready"])
         self.assertFalse(telemetry["pressure_latch_set"])
+        self.assertEqual(telemetry["dac_mv"], 250)
         self.assertEqual(telemetry["run_mode"], "waveform")
         self.assertTrue(telemetry["ramp_up_active"])
         self.assertEqual(telemetry["calibration_stage"], "ramp_up")
@@ -118,7 +119,6 @@ class ArduinoTelemetryTests(unittest.TestCase):
         bridge = object.__new__(ArduinoSerialBridge)
         bridge._write_lock = threading.Lock()
         bridge._request_unlocked = Mock(return_value={})
-        bridge._send_command_unlocked = Mock()
 
         bridge.load_waveform((1, -1), 250, 1.25)
 
@@ -126,8 +126,11 @@ class ArduinoTelemetryTests(unittest.TestCase):
             bridge._request_unlocked.call_args_list[0].args[0],
             "WAVE_BEGIN 250 2 668904070 1250000",
         )
-        bridge._send_command_unlocked.assert_called_once_with("WAVE_DATA 0 1 -1")
-        self.assertEqual(bridge._request_unlocked.call_args_list[1].args[0], "WAVE_END")
+        self.assertEqual(
+            bridge._request_unlocked.call_args_list[1].args[0],
+            "WAVE_DATA 0 1 -1",
+        )
+        self.assertEqual(bridge._request_unlocked.call_args_list[2].args[0], "WAVE_END")
 
     def test_physical_flow_commands_are_sent_in_integer_microliters_per_second(self):
         bridge = object.__new__(ArduinoSerialBridge)
@@ -203,7 +206,6 @@ class StartReadinessTests(unittest.TestCase):
             1.4,
         )
         self.assertEqual(self.handler._max_flow_ml_s({}), 1.0)
-
 
 if __name__ == "__main__":
     unittest.main()

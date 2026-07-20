@@ -18,7 +18,7 @@ from .constants import (
 from .curve import curve_from_json
 from .simulator import PumpControllerSimulator
 from .system_state import derive_system_state
-from .waveform import WaveformProgram, program_from_text
+from .waveform import WaveformProgram, program_from_text, round_to_raster_ms
 
 
 class CardiopumpServer(ThreadingHTTPServer):
@@ -27,7 +27,7 @@ class CardiopumpServer(ThreadingHTTPServer):
     flow_ml_s: float = 0.0
     waveform_program: WaveformProgram | None = None
     waveform_update_hz: int = WAVEFORM_UPDATE_HZ
-    trigger_high_ms: float = 10.0
+    trigger_high_ms: float = round_to_raster_ms(10.0, WAVEFORM_UPDATE_HZ)
 
     def server_close(self) -> None:
         if self.arduino is not None:
@@ -44,7 +44,7 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
             self._send_static("index.html")
             return
 
-        if self.path in ("/app.css", "/app.js"):
+        if self.path in ("/app.css", "/app.js", "/calibration.js"):
             self._send_static(self.path.lstrip("/"))
             return
 
@@ -97,20 +97,16 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                     if self.server.control_mode == "waveform":
                         if self.server.waveform_program is None:
                             raise RuntimeError("load a waveform before starting waveform mode")
-                        if (
-                            hardware.get("calibration_valid")
-                            and self.server.waveform_program.max_flow_ml_s > max_flow_ml_s
-                        ):
-                            raise RuntimeError(
-                                f"waveform exceeds calibrated maximum flow of {max_flow_ml_s:g} mL/s"
-                            )
+                        samples = self.server.waveform_program.samples_with_flow_limit(
+                            max_flow_ml_s
+                        )
                         self.arduino.load_waveform(
-                            self.server.waveform_program.samples,
+                            samples,
                             self.server.waveform_program.update_hz,
-                            self.server.waveform_program.max_flow_ml_s,
+                            self.server.waveform_program.applied_max_flow_ml_s(max_flow_ml_s),
                         )
                         loaded = self.arduino.wait_for_wave_loaded(
-                            len(self.server.waveform_program.samples)
+                            len(samples)
                         )
                         self.arduino.request_telemetry()
                         if not loaded:
@@ -265,6 +261,14 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                             + ", ".join(str(rate) for rate in WAVEFORM_UPDATE_RATES)
                         )
                     self.server.waveform_update_hz = update_hz
+                    self.server.trigger_high_ms = round_to_raster_ms(
+                        self.server.trigger_high_ms,
+                        update_hz,
+                    )
+                    if self.arduino is not None:
+                        self.arduino.set_trigger_high_us(
+                            round(self.server.trigger_high_ms * 1000)
+                        )
                     if self.server.waveform_program is not None:
                         self.server.waveform_program = self.server.waveform_program.with_update_hz(
                             update_hz
@@ -292,10 +296,11 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                     period_ms = float(
                         payload.get("waveform_period_ms", self.server.waveform_program.period_ms)
                     )
-                    self.server.waveform_program = self.server.waveform_program.with_settings(
+                    waveform_program = self.server.waveform_program.with_settings(
                         max_flow_ml_s,
                         period_ms,
                     )
+                    self.server.waveform_program = waveform_program
                 if payload.get("reset_waveform_scaling"):
                     if self.server.waveform_program is None:
                         raise RuntimeError("load a waveform before resetting waveform settings")
@@ -313,9 +318,14 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                     trigger_high_ms = float(payload["trigger_high_ms"])
                     if not isfinite(trigger_high_ms) or not 0.1 <= trigger_high_ms <= 1000.0:
                         raise ValueError("trigger high time must be between 0.1 and 1000 ms")
-                    self.server.trigger_high_ms = trigger_high_ms
+                    self.server.trigger_high_ms = round_to_raster_ms(
+                        trigger_high_ms,
+                        self.server.waveform_update_hz,
+                    )
                     if self.arduino is not None:
-                        self.arduino.set_trigger_high_us(round(trigger_high_ms * 1000))
+                        self.arduino.set_trigger_high_us(
+                            round(self.server.trigger_high_ms * 1000)
+                        )
                 self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
                 return
 
@@ -396,7 +406,7 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
             "waveform_update_hz": self.server.waveform_update_hz,
             "waveform_update_rates": list(WAVEFORM_UPDATE_RATES),
             "waveform_available": self.server.waveform_program is not None,
-            "waveform": self.server.waveform_program.to_json()
+            "waveform": self.server.waveform_program.to_json(max_flow_ml_s)
             if self.server.waveform_program is not None
             else None,
         }

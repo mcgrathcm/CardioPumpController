@@ -5,18 +5,24 @@ controller through an Arduino Uno R4 WiFi.
 
 Current scope:
 
-- Browser GUI and Python backend connected to the Arduino over USB serial. The
-  frontend is kept framework-neutral for a future Vite/Electron application.
+- Electron desktop GUI built with Vite and connected to the Arduino over USB
+  serial through the existing Python control backend. Electron launches and
+  owns the backend process, proxies renderer API requests through a restricted
+  preload bridge, and sends the 100 ms heartbeat from its main process. Losing
+  renderer focus or minimizing the window therefore does not pause heartbeats.
+- The browser GUI remains available as a development fallback. In browser mode
+  only, the renderer sends the heartbeat because no Electron main process exists.
 - Constant flow commands use non-negative `mL/s` values and are mapped to `+-10 V`.
   The Arduino owns the active flow-to-voltage mapping. Before all four
   calibration points are loaded, the `1.0 mL/s` nominal fallback is capped at
   a conservative `2.5 V`.
-- Pulsatile waveform files use two columns: `time_ms` and signed `flow_ml_s`.
+- Pulsatile waveform files use two numeric columns, `time_ms` and signed
+  `flow_ml_s`, in either comma-delimited CSV or whitespace-delimited text.
 - Waveforms are interpolated at a selectable `250` or `500 Hz` raster
   and transferred as signed Q15 values plus their physical peak flow. The
   Arduino applies the measured forward calibration by magnitude for both flow
   directions. Before calibration, the configured waveform peak is capped at
-  `+-2.5 V`.
+  `1.0 mL/s`, which maps to a conservative `+-2.5 V`.
 - Pulsatile negative-flow clipping and per-cycle total stroke-volume diagnostics
   are available in the Flow view.
 - Trigger output is pin 7, active high, with a 10 ms default pulse. Starts use a
@@ -62,6 +68,9 @@ Calibration workflow:
   be loaded atomically with `CAL_LOAD`; the GUI is responsible for reloading it
   from a standalone calibration file after a board reset. Only last-fault
   diagnostics are retained on the Arduino.
+- The Setup tab can save and load standalone calibration JSON files. Files use
+  the fixed `2.5`, `5`, `7.5`, and `10 V` points and four positive, strictly
+  increasing `flows_ml_s` values. Loading replaces all four RAM values atomically.
 - Negative-flow commands reuse the forward calibration by magnitude; calibration
   runs do not drive the pump in reverse.
 
@@ -79,14 +88,45 @@ Run tests:
 uv run python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Run the web GUI and backend:
+Install the desktop dependencies once:
+
+```sh
+pnpm install
+```
+
+Build the Vite renderer and start the Electron app with hardware auto-detection:
+
+```sh
+pnpm start
+```
+
+Run the complete Electron app without opening a serial port:
+
+```sh
+pnpm start:sim
+```
+
+For renderer development with Vite hot reload, use `pnpm dev` or
+`pnpm dev:sim`. A specific serial port can be passed through Electron:
+
+```sh
+pnpm start -- --serial-port=/dev/cu.usbmodem90706925F9BC2
+```
+
+The Electron app requires `uv` while running from this source checkout because
+the main process launches `uv run cardiopump-backend`. It uses an ephemeral
+localhost port, maintains the firmware heartbeat in the main process, and stops
+the backend when the desktop app exits. A renderer crash or unresponsive window
+stops main-process heartbeats so the firmware still enters its controlled
+communication fault; minimizing or unfocusing a healthy window does not.
+
+Run the browser fallback and backend directly:
 
 ```sh
 uv run cardiopump-backend
 ```
 
-Open `http://127.0.0.1:8765` in a browser. The same frontend can be wrapped by
-Vite/Electron later because it talks to the backend through JSON HTTP endpoints.
+Open `http://127.0.0.1:8765` in a browser.
 
 By default the backend auto-connects to the last `/dev/cu.usbmodem*` Arduino
 port it finds. To force a port:
@@ -97,6 +137,24 @@ uv run cardiopump-backend --serial-port /dev/cu.usbmodem90706925F9BC2
 
 Use `--no-hardware` to run the backend without opening a serial port. Hardware
 start and enable controls remain unavailable in this mode.
+
+Run GUI and backend tests:
+
+```sh
+pnpm test
+uv run python -m unittest discover -s tests -p 'test_*.py'
+```
+
+Example calibration file:
+
+```json
+{
+  "format": "cardiopump-calibration",
+  "version": 1,
+  "voltages_v": [2.5, 5, 7.5, 10],
+  "flows_ml_s": [0.1, 0.2, 0.35, 0.5]
+}
+```
 
 Compile the production firmware without uploading it:
 

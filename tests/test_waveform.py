@@ -1,6 +1,6 @@
 import unittest
 
-from cardiopump_backend.waveform import _flow_to_q15, program_from_text
+from cardiopump_backend.waveform import _flow_to_q15, program_from_text, round_to_raster_ms
 
 
 class WaveformProgramTests(unittest.TestCase):
@@ -9,6 +9,11 @@ class WaveformProgramTests(unittest.TestCase):
 
         self.assertEqual(program.update_hz, 4)
         self.assertEqual(program.duration_s, 1.0)
+        self.assertEqual(program.samples, (0, 16384, 32767, 16384))
+
+    def test_accepts_comma_delimited_waveform(self):
+        program = program_from_text("0,0\n500,1\n1000,0\n", update_hz=4)
+
         self.assertEqual(program.samples, (0, 16384, 32767, 16384))
 
     def test_supports_negative_flow(self):
@@ -58,6 +63,10 @@ class WaveformProgramTests(unittest.TestCase):
         self.assertEqual(updated.period_ms, 1000.0)
         self.assertEqual(updated.sample_count, 500)
 
+    def test_rounds_trigger_duration_to_nearest_raster(self):
+        self.assertEqual(round_to_raster_ms(10.0, 250), 12.0)
+        self.assertEqual(round_to_raster_ms(10.0, 500), 10.0)
+
     def test_negative_flow_clipping_and_total_stroke_volume(self):
         program = program_from_text("0 1\n500 -1\n1000 1\n", update_hz=4)
         clipped = program.with_clip_negative_flow(True)
@@ -65,6 +74,20 @@ class WaveformProgramTests(unittest.TestCase):
         self.assertEqual(clipped.samples, (32767, 0, 0, 0))
         self.assertEqual(clipped.negative_clipped_sample_count, 1)
         self.assertAlmostEqual(clipped.total_stroke_volume_ml, 0.25)
+
+    def test_clips_scaled_waveform_to_external_flow_limit(self):
+        program = program_from_text("0 0\n500 2\n1000 0\n", update_hz=4)
+        payload = program.to_json(max_flow_limit_ml_s=1.0)
+
+        self.assertEqual(program.max_flow_ml_s, 2.0)
+        self.assertEqual(payload["max_flow_ml_s"], 2.0)
+        self.assertEqual(payload["applied_max_flow_ml_s"], 1.0)
+        self.assertEqual(payload["clipped_sample_count"], 1)
+        self.assertEqual(max(point["flow_ml_s"] for point in payload["preview"]), 1.0)
+        self.assertEqual(
+            program.samples_with_flow_limit(1.0),
+            (0, 32767, 32767, 32767),
+        )
 
     def test_q15_conversion_clips_to_signed_dac_range(self):
         self.assertEqual(_flow_to_q15(1.2), 32767)

@@ -3,170 +3,324 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0b1725">
     <title>Cardiopump Control</title>
     <link rel="stylesheet" href="/app.css">
   </head>
   <body>
     <header class="topbar">
-      <div>
-        <h1>Cardiopump Control</h1>
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 32 18" focusable="false">
+            <path d="M1 10h4c1.1 0 1.5-1.8 2.6-1.8S9.1 10 10.2 10H12l1.3 1.3L15.5 2.5 18 15l1.7-5H21c1.1 0 1.6-3.2 3.4-3.2S26.8 10 28.2 10H31"/>
+          </svg>
+        </span>
+        <h1>Cardiopump</h1>
+      </div>
+      <div id="control-message" class="activity-bar" role="status" aria-live="polite">
+        <span class="activity-indicator" aria-hidden="true"></span>
+        <span class="activity-label">Activity</span>
+        <span class="activity-copy">Set constant flow or load a pulsatile waveform.</span>
       </div>
       <div class="topbar-actions">
-        <span id="system-state-status" class="pill">Disconnected</span>
-        <button id="main-enable-button" class="big-button ribbon-button enable">Enable</button>
-        <button id="main-start-button" class="big-button ribbon-button start" disabled>Start</button>
+        <div class="system-summary" aria-live="polite">
+          <span id="system-state-status" class="pill neutral">Disconnected</span>
+          <span id="system-state-detail">Waiting for controller</span>
+        </div>
+        <button id="main-enable-button" class="big-button ribbon-button enable" type="button">Enable</button>
+        <button id="main-start-button" class="big-button ribbon-button start" type="button" disabled>Start</button>
       </div>
     </header>
 
-    <main class="layout">
-      <nav class="tabs" role="tablist" aria-label="Main navigation">
-        <button id="flow-tab-button" class="tab-button active" role="tab" type="button" data-tab="flow" aria-controls="flow-tab" aria-selected="true">Flow</button>
-        <button id="setup-tab-button" class="tab-button" role="tab" type="button" data-tab="setup" aria-controls="setup-tab" aria-selected="false">Setup</button>
-        <button id="debug-tab-button" class="tab-button" role="tab" type="button" data-tab="debug" aria-controls="debug-tab" aria-selected="false">Debug</button>
-      </nav>
-      <p id="control-message" class="message global-message">Set constant flow in mL/s, or load a signed mL/s waveform.</p>
-
-      <section id="flow-tab" class="tab-panel" role="tabpanel" aria-labelledby="flow-tab-button">
-        <nav class="flow-tabs" role="tablist" aria-label="Flow mode">
-          <button id="constant-mode-button" class="flow-tab-button active" role="tab" type="button" data-flow-mode="constant" aria-controls="constant-flow-panel" aria-selected="true">Constant Flow</button>
-          <button id="waveform-mode-button" class="flow-tab-button" role="tab" type="button" data-flow-mode="waveform" aria-controls="pulsatile-flow-panel" aria-selected="false">Pulsatile Flow</button>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <nav class="primary-nav" role="tablist" aria-label="Main navigation">
+          <button id="flow-tab-button" class="tab-button active" role="tab" type="button" data-tab="flow" aria-controls="flow-tab" aria-selected="true">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M3 12h3l2.5-6 4 12 3-8 2 2H21"/></svg>
+            </span>
+            <span><strong>Flow</strong><small>Operate the pump</small></span>
+          </button>
+          <button id="setup-tab-button" class="tab-button" role="tab" type="button" data-tab="setup" aria-controls="setup-tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h2M10 17h10M14 4v6M6 14v6"/></svg>
+            </span>
+            <span><strong>Setup</strong><small>Configure hardware</small></span>
+          </button>
+          <button id="debug-tab-button" class="tab-button" role="tab" type="button" data-tab="debug" aria-controls="debug-tab" aria-selected="false">
+            <span class="nav-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="M8 9h8M8 15h8M9 3h6l1 3h2v12h-2l-1 3H9l-1-3H6V6h2l1-3Z"/></svg>
+            </span>
+            <span><strong>Debug</strong><small>Inspect diagnostics</small></span>
+          </button>
         </nav>
 
-        <section id="constant-flow-panel" class="flow-panel" role="tabpanel" aria-labelledby="constant-mode-button">
-          <section class="panel control-panel">
-            <div class="panel-title">
-              <h2>Constant Flow</h2>
+        <section class="sidebar-health" aria-label="Controller readiness">
+          <p class="sidebar-label">Controller readiness</p>
+          <span id="connection-status" class="pill neutral">Connecting</span>
+          <button id="overpressure-status" class="pill status-button neutral" type="button">Pressure unknown</button>
+          <span id="servo-status" class="pill neutral">Servo unknown</span>
+          <span id="arduino-enable-status" class="pill neutral">Arduino disabled</span>
+          <span id="dac-status" class="pill neutral">DAC unknown</span>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <section id="flow-tab" class="tab-panel" role="tabpanel" aria-labelledby="flow-tab-button">
+          <header class="page-heading">
+            <div>
+              <p class="eyebrow">Pump operation</p>
+              <h2>Flow control</h2>
             </div>
-            <label class="flow-control">
-              Desired flow (mL/s)
-              <input id="flow-input" type="number" min="0" max="1" step="0.01" value="0">
-            </label>
+            <nav class="flow-tabs" role="tablist" aria-label="Flow mode">
+              <button id="constant-mode-button" class="flow-tab-button active" role="tab" type="button" data-flow-mode="constant" aria-controls="constant-flow-panel" aria-selected="true">Constant</button>
+              <button id="waveform-mode-button" class="flow-tab-button" role="tab" type="button" data-flow-mode="waveform" aria-controls="pulsatile-flow-panel" aria-selected="false">Pulsatile</button>
+            </nav>
+          </header>
+
+          <section id="constant-flow-panel" class="flow-panel" role="tabpanel" aria-labelledby="constant-mode-button">
+            <div class="constant-workspace">
+              <section class="panel control-panel">
+                <div class="panel-title">
+                  <div>
+                    <p class="eyebrow">Target</p>
+                    <h3>Constant flow</h3>
+                  </div>
+                  <span class="mode-note">mL/s</span>
+                </div>
+                <label class="flow-control">
+                  Desired flow
+                  <span class="input-with-unit">
+                    <input id="flow-input" type="number" min="0" max="1" step="0.01" value="0">
+                    <span>mL/s</span>
+                  </span>
+                </label>
+                <p class="field-note">The configured flow is applied on Start. Flow is limited by the active calibration.</p>
+              </section>
+
+              <section class="panel flow-visual-panel" aria-label="Constant flow summary">
+                <div class="panel-title">
+                  <div>
+                    <p class="eyebrow">Command preview</p>
+                    <h3>Flow output</h3>
+                  </div>
+                  <span id="constant-flow-mode" class="mini-status">Stopped</span>
+                </div>
+                <div class="flow-gauge-row">
+                  <div id="constant-flow-gauge" class="flow-gauge" style="--flow-percent: 0">
+                    <div>
+                      <strong id="constant-flow-value">0.00</strong>
+                      <span>mL/s</span>
+                    </div>
+                  </div>
+                  <dl class="metric-list">
+                    <div><dt>Available range</dt><dd id="constant-flow-limit">0–1.00 mL/s</dd></div>
+                    <div><dt>Calibration</dt><dd id="constant-calibration-state">Conservative limit</dd></div>
+                    <div><dt>Output state</dt><dd id="constant-output-state">Disabled</dd></div>
+                  </dl>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section id="pulsatile-flow-panel" class="flow-panel" role="tabpanel" aria-labelledby="waveform-mode-button" hidden>
+            <div class="waveform-workspace">
+              <section class="panel waveform-visual-panel">
+                <div class="panel-title waveform-title">
+                  <div>
+                    <p class="eyebrow">Command preview</p>
+                    <h3>Pulsatile waveform</h3>
+                  </div>
+                  <span id="waveform-position-label" class="mini-status">Preview</span>
+                </div>
+                <div class="waveform-metrics" aria-label="Waveform summary">
+                  <div><span>Peak flow</span><strong id="waveform-peak-value">—</strong></div>
+                  <div><span>Period</span><strong id="waveform-duration-value">—</strong></div>
+                  <div><span>Samples</span><strong id="waveform-samples-value">—</strong></div>
+                  <div><span>Stroke volume</span><strong id="waveform-volume-value">—</strong></div>
+                </div>
+                <div class="chart-frame">
+                  <canvas id="waveform-canvas" width="960" height="360" aria-label="Scaled flow waveform preview"></canvas>
+                  <div class="chart-legend" aria-hidden="true"><span></span> Commanded flow</div>
+                </div>
+                <div class="chart-footer">
+                  <p id="waveform-status" class="message">No waveform loaded.</p>
+                  <span id="waveform-clipping-value" class="clip-status">No clipping</span>
+                </div>
+              </section>
+
+              <section class="panel waveform-controls">
+                <div class="panel-title">
+                  <div>
+                    <p class="eyebrow">Parameters</p>
+                    <h3>Waveform setup</h3>
+                  </div>
+                </div>
+                <div class="waveform-loader">
+                  <label class="file-drop-control">
+                    <span>Flow waveform</span>
+                    <strong id="waveform-file-title">Choose a two-column text or CSV file</strong>
+                    <small id="waveform-file-hint">Loading prepares the preview. Transfer occurs on Start.</small>
+                    <input id="waveform-file" type="file" accept=".txt,.csv,text/plain,text/csv">
+                  </label>
+                  <p id="waveform-raster-note" class="field-note" hidden></p>
+                  <div class="waveform-settings">
+                    <label>
+                      Maximum flow
+                      <span class="input-with-unit compact">
+                        <input id="waveform-max-flow-input" type="number" min="0" step="0.01">
+                        <span>mL/s</span>
+                      </span>
+                    </label>
+                    <label>
+                      Period
+                      <span class="input-with-unit compact">
+                        <input id="waveform-period-input" type="number" min="1" step="1">
+                        <span>ms</span>
+                      </span>
+                    </label>
+                  </div>
+                  <p id="waveform-flow-limit-note" class="field-note"></p>
+                  <label class="switch-control">
+                    <span><strong>Clip reverse flow</strong><small>Clamp negative samples to zero</small></span>
+                    <input id="clip-negative-flow-input" type="checkbox">
+                    <span class="switch" aria-hidden="true"></span>
+                  </label>
+                  <button id="reset-waveform-defaults-button" class="secondary-button" type="button">Reset waveform defaults</button>
+                </div>
+              </section>
+            </div>
           </section>
         </section>
 
-        <section id="pulsatile-flow-panel" class="flow-panel" role="tabpanel" aria-labelledby="waveform-mode-button" hidden>
-          <section class="panel control-panel">
-            <div class="panel-title">
-              <h2>Pulsatile Flow</h2>
+        <section id="setup-tab" class="tab-panel" role="tabpanel" aria-labelledby="setup-tab-button" hidden>
+          <header class="page-heading">
+            <div>
+              <p class="eyebrow">Hardware configuration</p>
+              <h2>Setup</h2>
             </div>
-            <div class="waveform-loader">
-              <label class="file-control">
-                Flow waveform
-                <input id="waveform-file" type="file" accept=".txt,text/plain">
-              </label>
-              <p id="waveform-raster-note" class="field-note" hidden></p>
-              <div class="waveform-settings">
+          </header>
+
+          <div class="setup-grid">
+            <section class="panel setup-card">
+              <div class="panel-title">
+                <div><p class="eyebrow">Timing</p><h3>Trigger and raster</h3></div>
+              </div>
+              <div class="setup-fields">
                 <label>
-                  Maximum flow (mL/s)
-                  <input id="waveform-max-flow-input" type="number" min="0" step="0.01">
+                  Trigger high time
+                  <span class="input-with-unit compact">
+                    <input id="trigger-high-ms-input" type="number" min="4" max="1000" step="4" value="12">
+                    <span>ms</span>
+                  </span>
                 </label>
-                <label>
-                  Period (ms)
-                  <input id="waveform-period-input" type="number" min="1" step="1">
+                <label class="switch-control raster-switch-control">
+                  <span><strong>Waveform update rate</strong><small id="waveform-rate-label">250 Hz raster</small></span>
+                  <span class="binary-switch">
+                    <span id="waveform-rate-250" class="selected">250</span>
+                    <input id="waveform-rate-toggle" type="checkbox" role="switch" aria-label="Waveform update rate">
+                    <span class="switch" aria-hidden="true"></span>
+                    <span id="waveform-rate-500">500</span>
+                  </span>
                 </label>
               </div>
-              <label class="checkbox-control">
-                <input id="clip-negative-flow-input" type="checkbox">
-                Clip negative flow to zero
-              </label>
-              <button id="reset-waveform-defaults-button" type="button">Reset to Default</button>
-              <canvas id="waveform-canvas" width="720" height="220" aria-label="Scaled waveform display"></canvas>
-              <p id="waveform-status" class="message">No waveform loaded.</p>
-            </div>
-          </section>
-        </section>
-      </section>
+              <p class="field-note">Trigger timing is sent before each run. Changing the raster resamples the loaded waveform.</p>
+            </section>
 
-      <section id="setup-tab" class="tab-panel" role="tabpanel" aria-labelledby="setup-tab-button" hidden>
-        <section class="panel setup-panel">
-          <div class="panel-title">
-            <h2>Setup</h2>
-            <span class="mode-note">Hardware configuration</span>
-          </div>
-          <div class="setup-section">
-            <h3>Trigger</h3>
-            <div class="trigger-settings">
-              <label>
-                Trigger high time (ms)
-                <input id="trigger-high-ms-input" type="number" min="0.1" max="1000" step="0.1" value="10">
+            <section class="panel setup-card calibration-file-card">
+              <div class="panel-title">
+                <div><p class="eyebrow">Calibration data</p><h3>Import and export</h3></div>
+              </div>
+              <label class="file-drop-control compact-drop">
+                <span>Calibration file</span>
+                <strong id="calibration-file-title">Load four measured flow values</strong>
+                <small id="calibration-file-hint">Points must correspond to 2.5, 5, 7.5, and 10 V.</small>
+                <input id="calibration-file" type="file" accept=".json,application/json">
               </label>
-            </div>
-          </div>
-          <div class="setup-section">
-            <h3>System Raster</h3>
-            <label class="setup-control">
-              Waveform update rate
-              <select id="waveform-rate-select">
-                <option value="250">250 Hz</option>
-                <option value="500">500 Hz</option>
-              </select>
-            </label>
-          </div>
-          <div class="setup-section">
-            <div class="section-heading">
-              <h3>Calibration</h3>
-              <span id="calibration-status" class="mode-note">Not configured</span>
-            </div>
-            <p class="field-note">Each point runs a 500 ms ramp up, 59.5 s flat top, and 500 ms ramp down. The Arduino keeps the enable engaged after the run.</p>
-            <div id="calibration-points" class="calibration-points"></div>
-            <label class="checkbox-control calibration-confirm">
-              <input id="calibration-confirm-input" type="checkbox">
-              I understand the pump will start when calibration begins.
-            </label>
-            <button id="calibration-start-button" type="button" disabled>Start 2.5 V Point</button>
-            <div id="calibration-measurement" class="calibration-measurement" hidden>
-              <label>
-                Measurement type
-                <select id="calibration-measurement-type">
-                  <option value="mean_flow_ml_s">Mean flow (mL/s)</option>
-                  <option value="volume_ml">Fluid volume (mL)</option>
-                </select>
-              </label>
-              <label>
-                Measured value
-                <input id="calibration-measurement-value" type="number" min="0" step="any">
-              </label>
-              <button id="calibration-save-button" type="button">Save Measurement</button>
-            </div>
-            <button id="calibration-clear-button" class="secondary-action" type="button">Clear Calibration</button>
-          </div>
-        </section>
-      </section>
+              <div class="button-row secondary-action">
+                <button id="calibration-export-button" class="secondary-button" type="button" disabled>Save calibration file</button>
+                <button id="calibration-clear-button" class="danger-ghost-button" type="button">Clear calibration</button>
+              </div>
+            </section>
 
-      <section id="debug-tab" class="tab-panel" role="tabpanel" aria-labelledby="debug-tab-button" hidden>
-        <section class="panel debug-panel">
-          <div class="panel-title">
-            <h2>Debug</h2>
-            <span class="mode-note">Diagnostics</span>
-          </div>
-          <div class="status-strip debug-status-strip">
-            <span id="connection-status" class="pill">Connecting</span>
-            <button id="overpressure-status" class="pill status-button" type="button">Overpressure</button>
-            <span id="servo-status" class="pill">Servo Fault</span>
-            <span id="arduino-enable-status" class="pill">Arduino Disabled</span>
-            <span id="dac-status" class="pill">DAC Unknown</span>
-          </div>
-          <div class="debug-actions">
-            <button id="clear-fault-button" type="button" disabled>Clear Fault</button>
-          </div>
-          <div class="timing-diagnostics">
-            <div class="section-heading">
-              <h3>Waveform Timing</h3>
-              <span id="timing-status" class="pill neutral">Timing Idle</span>
-            </div>
-            <p id="timing-details" class="field-note">No waveform timing data.</p>
-          </div>
-          <div class="timing-diagnostics">
-            <div class="section-heading">
-              <h3>Controller Diagnostics</h3>
-              <span id="watchdog-status" class="pill neutral">Watchdog Unknown</span>
-            </div>
-            <p id="controller-diagnostics" class="field-note">No controller diagnostics.</p>
+            <section class="panel calibration-panel">
+              <div class="panel-title">
+                <div><p class="eyebrow">Guided procedure</p><h3>Four-point calibration</h3></div>
+                <span id="calibration-status" class="mini-status">Not configured</span>
+              </div>
+              <p class="calibration-intro">Each point runs a 500 ms ramp up, 59.5 s flat top, and 500 ms ramp down. The Arduino remains enabled after the run so the measured result can be entered safely.</p>
+              <div class="calibration-workspace">
+                <div class="calibration-controls">
+                  <div id="calibration-points" class="calibration-points" aria-label="Select calibration point"></div>
+                  <div class="calibration-action-card">
+                    <label class="checkbox-control calibration-confirm">
+                      <input id="calibration-confirm-input" type="checkbox">
+                      <span>I understand the pump will start when calibration begins.</span>
+                    </label>
+                    <button id="calibration-start-button" class="primary-button" type="button" disabled>Start 2.5 V point</button>
+                  </div>
+                </div>
+                <section class="calibration-plot-card" aria-label="Calibration curve">
+                  <div class="calibration-plot-heading">
+                    <strong>Calibration curve</strong>
+                    <span id="calibration-plot-note">No measured points yet.</span>
+                  </div>
+                  <canvas id="calibration-canvas" width="720" height="320" aria-label="Measured flow by calibration voltage"></canvas>
+                </section>
+              </div>
+              <div id="calibration-measurement" class="calibration-measurement" hidden>
+                <div class="measurement-heading">
+                  <p class="eyebrow">Run complete</p>
+                  <h4>Enter the measured result</h4>
+                </div>
+                <label>
+                  Measurement type
+                  <select id="calibration-measurement-type">
+                    <option value="mean_flow_ml_s">Mean flow (mL/s)</option>
+                    <option value="volume_ml">Fluid volume (mL)</option>
+                  </select>
+                </label>
+                <label>
+                  Measured value
+                  <input id="calibration-measurement-value" type="number" min="0" step="any">
+                </label>
+                <button id="calibration-save-button" class="primary-button" type="button">Save measurement</button>
+              </div>
+            </section>
           </div>
         </section>
-      </section>
-    </main>
 
-    <script src="/app.js"></script>
+        <section id="debug-tab" class="tab-panel" role="tabpanel" aria-labelledby="debug-tab-button" hidden>
+          <header class="page-heading debug-heading">
+            <div>
+              <p class="eyebrow">Live telemetry</p>
+              <h2>Diagnostics</h2>
+            </div>
+            <button id="clear-fault-button" class="danger-ghost-button" type="button" disabled>Clear fault</button>
+          </header>
+
+          <div class="diagnostic-cards">
+            <section class="panel diagnostic-card">
+              <div class="section-heading"><div><p class="eyebrow">Performance</p><h3>Waveform timing</h3></div><span id="timing-status" class="pill neutral">Timing idle</span></div>
+              <div id="timing-details" class="diagnostic-grid"><div><span>Status</span><strong>No timing data</strong></div></div>
+            </section>
+            <section class="panel diagnostic-card">
+              <div class="section-heading"><div><p class="eyebrow">Controller</p><h3>Hardware I/O</h3></div></div>
+              <div id="hardware-diagnostics" class="diagnostic-grid"><div><span>Status</span><strong>No hardware data</strong></div></div>
+            </section>
+            <section class="panel diagnostic-card">
+              <div class="section-heading"><div><p class="eyebrow">Playback</p><h3>Run and trigger</h3></div></div>
+              <div id="run-diagnostics" class="diagnostic-grid"><div><span>Status</span><strong>No run data</strong></div></div>
+            </section>
+            <section class="panel diagnostic-card">
+              <div class="section-heading"><div><p class="eyebrow">Safety</p><h3>Controller health</h3></div><span id="watchdog-status" class="pill neutral">Watchdog unknown</span></div>
+              <div id="controller-diagnostics" class="diagnostic-grid"><div><span>Status</span><strong>No controller data</strong></div></div>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script type="module" src="/app.js"></script>
   </body>
 </html>

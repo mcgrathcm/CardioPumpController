@@ -35,6 +35,7 @@ POSITIONAL_TELEMETRY_FIELDS = (
     "watchdog_ok", "watchdog_timeout_ms", "reset_cause", "reset_status1",
     "retained_last_fault", "retained_fault_count", "uptime_ms",
 )
+COMPACT_HEARTBEAT_FIELDS = ("m", "f", "s", "u", "n", "g", "d", "w", "e", "r", "p", "a")
 
 FAULT_CODES = {
     "0": "none",
@@ -336,7 +337,7 @@ class ArduinoSerialBridge:
             for offset in range(0, len(samples), chunk_size):
                 chunk = samples[offset : offset + chunk_size]
                 values = " ".join(str(sample) for sample in chunk)
-                self._send_command_unlocked(f"WAVE_DATA {offset} {values}")
+                self._request_unlocked(f"WAVE_DATA {offset} {values}")
             self._request_unlocked("WAVE_END", timeout_s=5.0)
 
     def start_waveform(self) -> None:
@@ -462,6 +463,22 @@ class ArduinoSerialBridge:
     def _handle_line(self, line: str) -> None:
         if line.startswith("ACK") or line.startswith("ERR"):
             self._handle_response(line)
+            return
+        if line.startswith("HB4 "):
+            raw_values = line[4:].split()
+            if len(raw_values) != len(COMPACT_HEARTBEAT_FIELDS):
+                with self._lock:
+                    self._state.last_error = "invalid HB4 field count"
+                    self._state.raw_line = line
+                return
+            values = dict(zip(COMPACT_HEARTBEAT_FIELDS, raw_values, strict=True))
+            values["v"] = "4"
+            with self._response_condition:
+                self._state.connected = True
+                self._state.last_seen_s = time.monotonic()
+                self._state.raw_line = line
+                self._apply_compact_status(values)
+                self._response_condition.notify_all()
             return
         if line.startswith("TEL4 "):
             raw_values = line[5:].split()
@@ -656,6 +673,8 @@ class ArduinoSerialBridge:
             self._state.servo_ready = values["r"] == "1"
         if "p" in values:
             self._state.pressure_latch_set = values["p"] == "1"
+        if "a" in values:
+            self._state.dac_mv = self._parse_int(values["a"], self._state.dac_mv)
         if "wave_running" in values:
             self._state.wave_running = values["wave_running"] == "1"
         if "wave_loaded" in values:

@@ -1,5 +1,8 @@
 .venv/
-__pycache__/
 *.py[cod]
 .pytest_cache/
 .arduino-build/
+.pnpm-store/
+__pycache__/
+dist/
+node_modules/

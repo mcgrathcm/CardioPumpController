@@ -1,3 +1,16 @@
+# Converted from edit_P003_CoA_peak300.0_RR610.0_ut10.0_ECGdelay0.0.pmp
+# Original PMP metadata:
+# CompuFlow WF 1.0
+# SimuFlow III (110217-0001)
+# Name = pjnair;
+# UpdateTime = 0.01;
+# ECGPosition = 0;
+# NumberPoints = 61;
+# Scale = 300.0;
+# VolumeFlowRate = 36.04730280117158;
+# PeakFlowRate = 300.0;
+# Original waveform record: DataStart; ECG; ... EOWF; END;
+# Columns: time_ms,flow_normalized
 0,0
 10,0
 20,0

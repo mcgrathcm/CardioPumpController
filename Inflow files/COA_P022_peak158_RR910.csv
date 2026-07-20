@@ -1,3 +1,16 @@
+# Converted from COA_P022_peak158_RR910.pmp
+# Original PMP metadata:
+# CompuFlow WF 1.0
+# SimuFlow III (110217-0001)
+# Name = juzim;
+# UpdateTime = 0.01;
+# ECGPosition = 0;
+# NumberPoints = 91;
+# Scale = 158.0;
+# VolumeFlowRate = 25.188354396276768;
+# PeakFlowRate = 135.0;
+# Original waveform record: DataStart; ECG; ... EOWF; END;
+# Columns: time_ms,flow_normalized
 0,0.0020357474055693494
 10,0.035174793852443195
 20,0.08157524541393693

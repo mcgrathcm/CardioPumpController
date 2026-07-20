@@ -1,6 +1,19 @@
-0,0
-10,0
-20,0
+# Converted from CoAP001_CoA_peak266.0_RR850.0_ut10.0_ECGdelay0.0.pmp
+# Original PMP metadata:
+# CompuFlow WF 1.0
+# SimuFlow III (110217-0001)
+# Name = juzim;
+# UpdateTime = 0.01;
+# ECGPosition = 0;
+# NumberPoints = 85;
+# Scale = 266.0;
+# VolumeFlowRate = 59.64098231824955;
+# PeakFlowRate = 266.0;
+# Original waveform record: DataStart; ECG; ... EOWF; END;
+# Columns: time_ms,flow_normalized
+0,-0.0012191152109772283
+10,-0.00752203341324776
+20,-0.003164460670244791
 30,0.018162811102201488
 40,0.06056447548040351
 50,0.1248218571966364
@@ -83,4 +96,4 @@
 820,0.03272550337533522
 830,0.022281051948744118
 840,0.009934020306759725
-850,0
+850,-0.0012191152109772283

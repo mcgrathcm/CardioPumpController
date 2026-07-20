@@ -1,3 +1,16 @@
+# Converted from Aorta_cut_patient30a_cut_peak266.0_RR1000_ut10.0_ECGdelay0.0.pmp
+# Original PMP metadata:
+# CompuFlow WF 1.0
+# SimuFlow III (110217-0001)
+# Name = juzim;
+# UpdateTime = 0.01;
+# ECGPosition = 0;
+# NumberPoints = 100;
+# Scale = 266.0;
+# VolumeFlowRate = 85.56227865671175;
+# PeakFlowRate = 266.0;
+# Original waveform record: DataStart; ECG; ... EOWF; END;
+# Columns: time_ms,flow_normalized
 0,0
 10,0.00511172773244265
 20,0.012935740458716594

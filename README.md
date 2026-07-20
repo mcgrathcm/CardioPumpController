@@ -30,8 +30,8 @@ Current scope:
   Later triggers fire at each pulsatile cycle start and once per second in
   constant-flow mode.
 - `examples/sinusoid_1s_0_to_1.txt` is a signed one-second test waveform.
-- `Inflow files/` contains the original cardiac `.pmp` curves and validated,
-  loader-compatible CSV versions under `Inflow files/loader-ready/`.
+- `Inflow files/` contains validated, loader-compatible cardiac CSV curves.
+  Source PMP metadata is retained in each file as ignored `#` comments.
 - `Calibration files/example-format-not-measured.json` documents the calibration
   file format. Its placeholder values must not be used to operate hardware.
 - Heartbeat loss and waveform timing overruns ramp to zero over `0.5 s`, open

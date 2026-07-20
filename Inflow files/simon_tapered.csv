@@ -1,3 +1,16 @@
+# Converted from simon_tapered.pmp
+# Original PMP metadata:
+# CompuFlow WF 1.0
+# SimuFlow III (110217-0001)
+# Name = pjnair;
+# UpdateTime = 0.01;
+# ECGPosition = 0;
+# NumberPoints = 85;
+# Scale = 266.0;
+# VolumeFlowRate = 59.64098231824955;
+# PeakFlowRate = 266.0;
+# Original waveform record: DataStart; ECG; ... EOWF; END;
+# Columns: time_ms,flow_normalized
 0,0
 10,0
 20,0

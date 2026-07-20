@@ -1,3 +1,16 @@
+# Converted from PVNicoleRVOT_peak200_RR830.0_ut10.0_ECGdelay0.0 - modified.pmp
+# Original PMP metadata:
+# CompuFlow WF 1.0
+# SimuFlow III (110217-0001)
+# Name = juzim;
+# UpdateTime = 0.01;
+# ECGPosition = 0;
+# NumberPoints = 83;
+# Scale = 200;
+# VolumeFlowRate = 51.44303432288599;
+# PeakFlowRate = 200.0;
+# Original waveform record: DataStart; ECG; ... EOWF; END;
+# Columns: time_ms,flow_normalized
 0,0.06637954073617085
 10,0.06890590583550181
 20,0.07314472002867281

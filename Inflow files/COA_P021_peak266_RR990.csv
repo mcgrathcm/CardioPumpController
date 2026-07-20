@@ -1,3 +1,16 @@
+# Converted from COA_P021_peak266_RR990.pmp
+# Original PMP metadata:
+# CompuFlow WF 1.0
+# SimuFlow III (110217-0001)
+# Name = juzim;
+# UpdateTime = 0.01;
+# ECGPosition = 0;
+# NumberPoints = 99;
+# Scale = 266.0;
+# VolumeFlowRate = 69.78430706002753;
+# PeakFlowRate = 266.0;
+# Original waveform record: DataStart; ECG; ... EOWF; END;
+# Columns: time_ms,flow_normalized
 0,0.004413219122215218
 10,0.031630631426594155
 20,0.0762838162108337

@@ -30,6 +30,10 @@ Current scope:
   Later triggers fire at each pulsatile cycle start and once per second in
   constant-flow mode.
 - `examples/sinusoid_1s_0_to_1.txt` is a signed one-second test waveform.
+- `Inflow files/` contains the original cardiac `.pmp` curves and validated,
+  loader-compatible CSV versions under `Inflow files/loader-ready/`.
+- `Calibration files/example-format-not-measured.json` documents the calibration
+  file format. Its placeholder values must not be used to operate hardware.
 - Heartbeat loss and waveform timing overruns ramp to zero over `0.5 s`, open
   the Arduino-controlled relay, and latch a fault that requires manual clearing.
 - Overpressure and interlock failures stop immediately and latch a fault.
@@ -145,16 +149,8 @@ pnpm test
 uv run python -m unittest discover -s tests -p 'test_*.py'
 ```
 
-Example calibration file:
-
-```json
-{
-  "format": "cardiopump-calibration",
-  "version": 1,
-  "voltages_v": [2.5, 5, 7.5, 10],
-  "flows_ml_s": [0.1, 0.2, 0.35, 0.5]
-}
-```
+See `Calibration files/` for the calibration JSON schema example and its safety
+warning. Operational files must contain values measured from the connected pump.
 
 Compile the production firmware without uploading it:
 

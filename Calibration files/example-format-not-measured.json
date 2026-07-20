@@ -1,0 +1,6 @@
+{
+  "format": "cardiopump-calibration",
+  "version": 1,
+  "voltages_v": [2.5, 5, 7.5, 10],
+  "flows_ml_s": [0.1, 0.2, 0.35, 0.5]
+}

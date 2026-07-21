@@ -219,9 +219,9 @@ dd { margin: 0; }
 .eyebrow { color: var(--teal); font-size: 10px; font-weight: 850; letter-spacing: 0.12em; text-transform: uppercase; }
 
 .flow-tabs {
-  min-width: 250px;
+  min-width: 390px;
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(3, 1fr);
   padding: 4px;
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -310,14 +310,36 @@ select:hover:not(:disabled) { border-color: #9cabb9; }
 .waveform-workspace { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(280px, 0.72fr); gap: 18px; align-items: start; }
 .waveform-title { margin-bottom: 14px; }
 .waveform-metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-bottom: 13px; }
+.curve-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .waveform-metrics > div { padding: 10px 11px; border: 1px solid #e7ebef; border-radius: 8px; background: var(--surface-soft); }
 .waveform-metrics span { display: block; color: var(--muted); font-size: 9px; font-weight: 800; letter-spacing: 0.055em; text-transform: uppercase; }
 .waveform-metrics strong { display: block; margin-top: 5px; font-size: 14px; }
+.curve-metrics > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.curve-metrics strong { display: inline; margin-top: 0; }
 
 .chart-frame { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 10px; background: linear-gradient(180deg, #fbfcfd, #ffffff); }
-#waveform-canvas { width: 100%; height: auto; display: block; }
+#waveform-canvas,
+#curve-designer-canvas { width: 100%; height: auto; display: block; }
+#curve-designer-canvas { cursor: crosshair; touch-action: none; }
 .chart-legend { position: absolute; top: 11px; right: 12px; display: flex; align-items: center; gap: 6px; padding: 4px 7px; border-radius: 6px; background: rgba(255, 255, 255, 0.9); color: var(--muted); font-size: 9px; font-weight: 700; }
 .chart-legend span { width: 16px; height: 2px; background: var(--teal-bright); }
+.curve-chart-legend { gap: 7px; }
+.curve-original-legend { display: flex; align-items: center; gap: 6px; }
+.curve-original-legend[hidden] { display: none; }
+.curve-original-legend b { font: inherit; }
+.curve-chart-legend .original-curve-key { background: #aab2bc; }
+.curve-chart-legend .control-point-key { width: 8px; height: 8px; margin-left: 5px; border: 2px solid #d29425; border-radius: 50%; background: #ffffff; }
+.curve-point-menu { min-width: 132px; position: absolute; z-index: 4; display: grid; padding: 5px; border: 1px solid var(--line-strong); border-radius: 8px; background: #ffffff; box-shadow: 0 10px 24px rgba(30, 48, 70, 0.18); }
+.curve-point-menu[hidden] { display: none; }
+.curve-point-menu button { padding: 8px 10px; border: 0; border-radius: 5px; background: transparent; color: var(--ink); font-size: 11px; font-weight: 700; text-align: left; }
+.curve-point-menu button:hover:not(:disabled) { background: var(--surface-soft); }
+.curve-point-menu button:disabled { color: var(--muted); }
+.curve-point-count-stepper { display: grid; grid-template-columns: 32px minmax(0, 1fr) 32px; margin-top: 6px; }
+.curve-point-count-stepper input { min-width: 0; border-radius: 0; text-align: center; }
+.curve-point-count-stepper button { padding: 0; border: 1px solid var(--line-strong); background: var(--surface-soft); color: var(--ink); font-size: 16px; font-weight: 800; }
+.curve-point-count-stepper button:first-child { border-radius: 7px 0 0 7px; }
+.curve-point-count-stepper button:last-child { border-radius: 0 7px 7px 0; }
+.curve-point-count-stepper button:disabled { color: var(--muted); cursor: default; }
 .chart-footer { min-height: 34px; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-top: 10px; }
 .message { color: var(--muted); font-size: 11px; line-height: 1.45; }
 .clip-status { flex: 0 0 auto; color: var(--green); font-size: 10px; font-weight: 750; }
@@ -325,10 +347,10 @@ select:hover:not(:disabled) { border-color: #9cabb9; }
 
 .waveform-controls { position: sticky; top: 18px; }
 .waveform-loader { display: grid; gap: 13px; }
-.file-drop-control { min-height: 116px; position: relative; display: flex; flex-direction: column; justify-content: center; gap: 4px; padding: 16px; border: 1px dashed #aab8c5; border-radius: 10px; background: var(--surface-soft); text-transform: none; cursor: pointer; }
+.file-drop-control { width: 100%; min-width: 0; min-height: 116px; position: relative; display: flex; flex-direction: column; justify-content: center; gap: 4px; overflow: hidden; padding: 16px; border: 1px dashed #aab8c5; border-radius: 10px; background: var(--surface-soft); text-transform: none; cursor: pointer; }
 .file-drop-control:hover { border-color: var(--teal); background: var(--teal-soft); }
 .file-drop-control > span { color: var(--teal); font-size: 10px; font-weight: 850; letter-spacing: 0.08em; text-transform: uppercase; }
-.file-drop-control > strong { color: var(--ink); font-size: 13px; }
+.file-drop-control > strong { display: block; min-width: 0; max-width: 100%; overflow: hidden; color: var(--ink); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .file-drop-control > small { color: var(--muted); font-size: 10px; font-weight: 500; line-height: 1.4; }
 .file-drop-control input { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 .compact-drop { min-height: 66px; padding: 10px 13px; }
@@ -337,6 +359,9 @@ select:hover:not(:disabled) { border-color: #9cabb9; }
 .setup-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .waveform-settings label,
 .setup-fields label { display: grid; gap: 7px; }
+.waveform-settings .curve-interpolation-control { grid-column: 1 / -1; }
+.curve-point-count-control { display: grid; gap: 7px; }
+.waveform-loader .button-row > button { flex: 1 1 120px; }
 
 .switch-control { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; border-top: 1px solid #edf0f3; border-bottom: 1px solid #edf0f3; text-transform: none; }
 .switch-control > span:first-child { display: grid; gap: 3px; }

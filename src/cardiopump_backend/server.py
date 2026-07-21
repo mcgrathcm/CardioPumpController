@@ -18,7 +18,22 @@ from .constants import (
 from .curve import curve_from_json
 from .simulator import PumpControllerSimulator
 from .system_state import derive_system_state
-from .waveform import WaveformProgram, program_from_text, round_to_raster_ms
+from .waveform import (
+    WaveformProgram,
+    WaveformPoint,
+    constant_control_point_program,
+    control_point_fit_from_points,
+    control_point_program_from_points,
+    curve_designer_checkpoint_from_text,
+    curve_designer_checkpoint_text,
+    curve_designer_csv_text,
+    insert_control_point,
+    move_control_point,
+    program_from_text,
+    program_from_control_points,
+    remove_control_point,
+    round_to_raster_ms,
+)
 
 
 class CardiopumpServer(ThreadingHTTPServer):
@@ -26,8 +41,20 @@ class CardiopumpServer(ThreadingHTTPServer):
     control_mode: str = "constant"
     flow_ml_s: float = 0.0
     waveform_program: WaveformProgram | None = None
+    waveform_source: str | None = None
+    pulsatile_waveform_program: WaveformProgram | None = None
+    curve_designer_waveform_program: WaveformProgram | None = None
+    curve_designer_fit: dict[str, object] | None = None
+    curve_designer_source_program: WaveformProgram | None = None
+    curve_designer_reference_program: WaveformProgram | None = None
+    curve_designer_baseline_program: WaveformProgram | None = None
+    curve_designer_baseline_locked_times_ms: tuple[float, ...] = ()
+    curve_designer_locked_times_ms: tuple[float, ...] = ()
+    curve_designer_modified: bool = False
     waveform_update_hz: int = WAVEFORM_UPDATE_HZ
     trigger_high_ms: float = round_to_raster_ms(10.0, WAVEFORM_UPDATE_HZ)
+    loaded_calibration_flows_ml_s: tuple[float, float, float, float] | None = None
+    calibration_pending_transfer: bool = False
 
     def server_close(self) -> None:
         if self.arduino is not None:
@@ -78,6 +105,7 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
             if self.path == "/api/start":
                 hardware = self._hardware_telemetry()
                 self._require_start_ready(hardware)
+                hardware = self._sync_loaded_calibration(hardware)
                 max_flow_ml_s = self._max_flow_ml_s(hardware)
                 self.controller.set_simulated_interlocks(
                     overpressure_latched=bool(hardware.get("pressure_latch_set")),
@@ -153,6 +181,8 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                 voltage_mv = round(float(payload.get("voltage", 0)) * 1000)
                 self._require_start_ready(self._hardware_telemetry())
                 self.arduino.start_calibration(voltage_mv)
+                self.server.loaded_calibration_flows_ml_s = None
+                self.server.calibration_pending_transfer = False
                 self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
                 return
 
@@ -180,24 +210,43 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/api/calibration/clear":
-                if self.arduino is None:
-                    raise RuntimeError("arduino serial bridge is disabled")
-                self.arduino.clear_calibration()
-                self.arduino.request_telemetry()
-                time.sleep(0.05)
+                hardware = self._hardware_telemetry()
+                if (
+                    self.arduino is not None
+                    and hardware.get("connected")
+                    and hardware.get("fresh")
+                ):
+                    self.arduino.clear_calibration()
+                    self.arduino.request_telemetry()
+                    time.sleep(0.05)
+                elif not self.server.calibration_pending_transfer:
+                    raise RuntimeError("cannot clear Arduino calibration while disconnected")
+                self.server.loaded_calibration_flows_ml_s = None
+                self.server.calibration_pending_transfer = False
+                self.server.flow_ml_s = min(
+                    self.server.flow_ml_s,
+                    CONSTANT_FLOW_FULL_SCALE_ML_S,
+                )
                 self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
                 return
 
             if self.path == "/api/calibration/load":
-                if self.arduino is None:
-                    raise RuntimeError("arduino serial bridge is disabled")
                 payload = self._read_json()
                 flows = payload.get("flows_ml_s")
                 if not isinstance(flows, list) or len(flows) != 4:
                     raise ValueError("flows_ml_s must contain four calibration values")
-                self.arduino.load_calibration(tuple(float(value) for value in flows))
-                self.arduino.request_telemetry()
-                time.sleep(0.05)
+                calibration = tuple(float(value) for value in flows)
+                if any(not isfinite(flow) or flow <= 0.0 for flow in calibration):
+                    raise ValueError("calibration requires four positive flow values")
+                if any(
+                    right <= left
+                    for left, right in zip(calibration, calibration[1:])
+                ):
+                    raise ValueError("calibration flow values must be strictly increasing")
+                self.server.loaded_calibration_flows_ml_s = calibration
+                self.server.calibration_pending_transfer = True
+                self.server.flow_ml_s = min(self.server.flow_ml_s, calibration[-1])
+                self._sync_loaded_calibration(self._hardware_telemetry())
                 self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
                 return
 
@@ -230,6 +279,8 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                 payload = self._read_json()
                 if self.controller.telemetry(now_s)["running"]:
                     raise RuntimeError("stop pump before changing control settings")
+                if "waveform_source" in payload:
+                    self._activate_waveform_source(str(payload["waveform_source"]))
                 if "mode" in payload:
                     mode = str(payload["mode"])
                     if mode not in ("constant", "waveform"):
@@ -269,9 +320,29 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                         self.arduino.set_trigger_high_us(
                             round(self.server.trigger_high_ms * 1000)
                         )
-                    if self.server.waveform_program is not None:
-                        self.server.waveform_program = self.server.waveform_program.with_update_hz(
-                            update_hz
+                    if self.server.pulsatile_waveform_program is not None:
+                        self.server.pulsatile_waveform_program = (
+                            self.server.pulsatile_waveform_program.with_update_hz(update_hz)
+                        )
+                    if self.server.curve_designer_waveform_program is not None:
+                        self.server.curve_designer_waveform_program = (
+                            self.server.curve_designer_waveform_program.with_update_hz(update_hz)
+                        )
+                    if self.server.waveform_source == "pulsatile":
+                        self.server.waveform_program = self.server.pulsatile_waveform_program
+                    elif self.server.waveform_source == "curve_designer":
+                        self.server.waveform_program = self.server.curve_designer_waveform_program
+                    if self.server.curve_designer_source_program is not None:
+                        self.server.curve_designer_source_program = (
+                            self.server.curve_designer_source_program.with_update_hz(update_hz)
+                        )
+                    if self.server.curve_designer_reference_program is not None:
+                        self.server.curve_designer_reference_program = (
+                            self.server.curve_designer_reference_program.with_update_hz(update_hz)
+                        )
+                    if self.server.curve_designer_baseline_program is not None:
+                        self.server.curve_designer_baseline_program = (
+                            self.server.curve_designer_baseline_program.with_update_hz(update_hz)
                         )
                 if "waveform_scale" in payload:
                     if self.server.waveform_program is None:
@@ -296,11 +367,34 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                     period_ms = float(
                         payload.get("waveform_period_ms", self.server.waveform_program.period_ms)
                     )
-                    waveform_program = self.server.waveform_program.with_settings(
-                        max_flow_ml_s,
-                        period_ms,
-                    )
+                    if (
+                        self.server.waveform_source == "curve_designer"
+                        and self.server.curve_designer_fit is not None
+                        and self.server.curve_designer_fit["source"] == "constant"
+                        and self.server.waveform_program.source_peak_flow_ml_s == 0.0
+                        and max_flow_ml_s != 0.0
+                    ):
+                        self.server.waveform_program.with_settings(
+                            self.server.waveform_program.max_flow_ml_s,
+                            period_ms,
+                        )
+                        waveform_program = program_from_control_points(
+                            tuple(
+                                WaveformPoint(point.time_ms, max_flow_ml_s)
+                                for point in self.server.waveform_program.points
+                            ),
+                            interpolation=self.server.waveform_program.interpolation,
+                            update_hz=self.server.waveform_update_hz,
+                        ).with_settings(max_flow_ml_s, period_ms)
+                    else:
+                        waveform_program = self.server.waveform_program.with_settings(
+                            max_flow_ml_s,
+                            period_ms,
+                        )
                     self.server.waveform_program = waveform_program
+                    if self.server.waveform_source == "curve_designer":
+                        self._update_curve_fit_metrics()
+                        self.server.curve_designer_modified = True
                 if payload.get("reset_waveform_scaling"):
                     if self.server.waveform_program is None:
                         raise RuntimeError("load a waveform before resetting waveform settings")
@@ -326,6 +420,7 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                         self.arduino.set_trigger_high_us(
                             round(self.server.trigger_high_ms * 1000)
                         )
+                self._cache_active_waveform()
                 self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
                 return
 
@@ -338,8 +433,283 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                     raise ValueError("waveform text is required")
                 program = program_from_text(text, update_hz=self.server.waveform_update_hz)
                 self.server.waveform_program = program
+                self.server.waveform_source = "pulsatile"
+                self.server.pulsatile_waveform_program = program
                 self.server.control_mode = "waveform"
                 self._send_json({"ok": True, "waveform": program.to_json(), "telemetry": self._telemetry(now_s)})
+                return
+
+            if self.path == "/api/curve-designer":
+                if self.controller.telemetry(now_s)["running"]:
+                    raise RuntimeError("stop pump before initializing the curve designer")
+                payload = self._read_json()
+                text = payload.get("text")
+                if text is None:
+                    flow_ml_s = float(
+                        payload.get("constant_flow_ml_s", self.server.flow_ml_s)
+                    )
+                    program = constant_control_point_program(
+                        flow_ml_s,
+                        update_hz=self.server.waveform_update_hz,
+                    )
+                    fit_metadata: dict[str, object] = {
+                        "source": "constant",
+                        "source_point_count": 2,
+                        "max_error_ml_s": 0.0,
+                        "rmse_ml_s": 0.0,
+                    }
+                    source_program = None
+                    reference_program = None
+                    locked_times_ms: tuple[float, ...] = ()
+                else:
+                    if not isinstance(text, str):
+                        raise ValueError("curve text is required")
+                    checkpoint = curve_designer_checkpoint_from_text(
+                        text,
+                        update_hz=self.server.waveform_update_hz,
+                    )
+                    if checkpoint is not None:
+                        program, locked_times_ms = checkpoint
+                        reference_program = program
+                        source_program = program_from_text(
+                            curve_designer_csv_text(program),
+                            update_hz=self.server.waveform_update_hz,
+                        )
+                        fit_metadata = {
+                            "source": "checkpoint",
+                            "source_point_count": len(program.points),
+                            "max_error_ml_s": 0.0,
+                            "rmse_ml_s": 0.0,
+                            "initial_control_point_count": len(program.points),
+                        }
+                    else:
+                        control_point_count = payload.get("control_point_count")
+                        source_program = program_from_text(
+                            text,
+                            update_hz=self.server.waveform_update_hz,
+                        )
+                        reference_program = source_program
+                        fit = control_point_program_from_points(
+                            source_program.points,
+                            control_point_count,
+                            update_hz=self.server.waveform_update_hz,
+                        )
+                        program = fit.program.with_scaling(
+                            source_program.flow_scale,
+                            source_program.period_scale,
+                        )
+                        fit_metadata = {
+                            "source": "file",
+                            "source_point_count": fit.source_point_count,
+                            "max_error_ml_s": fit.max_error_ml_s * source_program.flow_scale,
+                            "rmse_ml_s": fit.rmse_ml_s * source_program.flow_scale,
+                            "initial_control_point_count": control_point_count,
+                        }
+                        locked_times_ms = ()
+                self.server.waveform_program = program
+                self.server.waveform_source = "curve_designer"
+                self.server.curve_designer_waveform_program = program
+                self.server.curve_designer_fit = fit_metadata
+                self.server.curve_designer_source_program = source_program
+                self.server.curve_designer_reference_program = reference_program
+                self.server.curve_designer_baseline_program = program
+                self.server.curve_designer_baseline_locked_times_ms = locked_times_ms
+                self.server.curve_designer_locked_times_ms = locked_times_ms
+                self.server.curve_designer_modified = False
+                self.server.control_mode = "waveform"
+                self._send_json(
+                    {
+                        "ok": True,
+                        "waveform": program.to_json(),
+                        "telemetry": self._telemetry(now_s),
+                    }
+                )
+                return
+
+            if self.path == "/api/curve-designer/export":
+                if (
+                    self.server.waveform_source != "curve_designer"
+                    or self.server.waveform_program is None
+                ):
+                    raise RuntimeError("initialize the curve designer before saving")
+                payload = self._read_json()
+                export_format = payload.get("format")
+                if export_format == "csv":
+                    text = curve_designer_csv_text(self.server.waveform_program)
+                elif export_format == "checkpoint":
+                    text = curve_designer_checkpoint_text(
+                        self.server.waveform_program,
+                        self.server.curve_designer_locked_times_ms,
+                    )
+                else:
+                    raise ValueError("Curve Designer export format must be csv or checkpoint")
+                self._send_json({"ok": True, "text": text})
+                return
+
+            if self.path == "/api/curve-designer/refit":
+                if self.controller.telemetry(now_s)["running"]:
+                    raise RuntimeError("stop pump before refitting the curve")
+                if (
+                    self.server.waveform_source != "curve_designer"
+                    or self.server.curve_designer_fit is None
+                    or self.server.curve_designer_source_program is None
+                ):
+                    raise RuntimeError("load a curve file before refitting")
+                payload = self._read_json()
+                reset = payload.get("reset") is True
+                if self.server.curve_designer_modified and not reset:
+                    raise RuntimeError("reset the curve before changing the point count")
+                if reset:
+                    program = self.server.curve_designer_baseline_program
+                    if program is None:
+                        raise RuntimeError("Curve Designer reset baseline is unavailable")
+                    self.server.waveform_program = program
+                    self.server.curve_designer_locked_times_ms = (
+                        self.server.curve_designer_baseline_locked_times_ms
+                    )
+                    self._update_curve_fit_metrics()
+                else:
+                    control_point_count = payload.get("control_point_count")
+                    source_program = self.server.curve_designer_source_program
+                    selected_fit = control_point_program_from_points(
+                        source_program.points,
+                        control_point_count,
+                        update_hz=self.server.waveform_update_hz,
+                    )
+                    baseline = self.server.curve_designer_baseline_program
+                    interpolation = baseline.interpolation if baseline is not None else "pchip"
+                    fit = control_point_fit_from_points(
+                        source_program.points,
+                        selected_fit.program.points,
+                        interpolation=interpolation,
+                        update_hz=self.server.waveform_update_hz,
+                    )
+                    program = fit.program.with_scaling(
+                        source_program.flow_scale,
+                        source_program.period_scale,
+                    )
+                    source = self.server.curve_designer_fit["source"]
+                    self.server.waveform_program = program
+                    self.server.curve_designer_fit = {
+                        "source": source,
+                        "source_point_count": fit.source_point_count,
+                        "max_error_ml_s": fit.max_error_ml_s * source_program.flow_scale,
+                        "rmse_ml_s": fit.rmse_ml_s * source_program.flow_scale,
+                        "initial_control_point_count": control_point_count,
+                    }
+                    self.server.curve_designer_baseline_program = program
+                    self.server.curve_designer_baseline_locked_times_ms = ()
+                    self.server.curve_designer_locked_times_ms = ()
+                self.server.curve_designer_modified = False
+                self.server.curve_designer_waveform_program = self.server.waveform_program
+                self.server.control_mode = "waveform"
+                self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
+                return
+
+            if self.path == "/api/curve-designer/interpolation":
+                if self.controller.telemetry(now_s)["running"]:
+                    raise RuntimeError("stop pump before changing curve interpolation")
+                if (
+                    self.server.waveform_source != "curve_designer"
+                    or self.server.waveform_program is None
+                ):
+                    raise RuntimeError("initialize the curve designer before changing interpolation")
+                payload = self._read_json()
+                interpolation = payload.get("interpolation")
+                if not isinstance(interpolation, str):
+                    raise ValueError("interpolation must be a string")
+                self.server.waveform_program = (
+                    self.server.waveform_program.with_interpolation(interpolation)
+                )
+                self.server.curve_designer_waveform_program = self.server.waveform_program
+                self._update_curve_fit_metrics()
+                self.server.curve_designer_modified = True
+                self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
+                return
+
+            if self.path == "/api/curve-designer/control-point":
+                if self.controller.telemetry(now_s)["running"]:
+                    raise RuntimeError("stop pump before editing control points")
+                if (
+                    self.server.waveform_source != "curve_designer"
+                    or self.server.waveform_program is None
+                    or self.server.curve_designer_fit is None
+                ):
+                    raise RuntimeError("initialize the curve designer before editing points")
+                payload = self._read_json()
+                action = payload.get("action")
+                time_value = payload.get("time_ms")
+                if isinstance(time_value, bool) or not isinstance(time_value, (int, float)):
+                    raise ValueError("control point time must be numeric")
+                time_ms = float(time_value)
+                program = self.server.waveform_program
+                old_period_scale = program.period_scale
+                locked_times = set(self.server.curve_designer_locked_times_ms)
+                if action == "add":
+                    program = insert_control_point(program, time_ms)
+                    self.server.curve_designer_locked_times_ms = tuple(
+                        sorted(point_time * old_period_scale for point_time in locked_times)
+                    )
+                else:
+                    point_index = self._curve_control_point_index(time_ms)
+                    point_time_ms = program.points[point_index].time_ms
+                    if action == "toggle_lock":
+                        linked_times = {point_time_ms}
+                        if point_index in (0, len(program.points) - 1):
+                            linked_times = {
+                                program.points[0].time_ms,
+                                program.points[-1].time_ms,
+                            }
+                        if linked_times <= locked_times:
+                            locked_times.difference_update(linked_times)
+                        else:
+                            locked_times.update(linked_times)
+                        self.server.curve_designer_locked_times_ms = tuple(
+                            sorted(locked_times)
+                        )
+                    elif action == "remove":
+                        program = remove_control_point(program, point_index)
+                        locked_times.discard(point_time_ms)
+                        self.server.curve_designer_locked_times_ms = tuple(
+                            sorted(
+                                locked_time * old_period_scale
+                                for locked_time in locked_times
+                            )
+                        )
+                    elif action == "move":
+                        if point_time_ms in locked_times:
+                            raise ValueError("unlock the control point before moving it")
+                        moved_time = payload.get("new_time_ms")
+                        moved_flow = payload.get("new_flow_ml_s")
+                        if (
+                            isinstance(moved_time, bool)
+                            or not isinstance(moved_time, (int, float))
+                            or isinstance(moved_flow, bool)
+                            or not isinstance(moved_flow, (int, float))
+                        ):
+                            raise ValueError("moved control point time and flow must be numeric")
+                        program = move_control_point(
+                            program,
+                            point_index,
+                            float(moved_time),
+                            float(moved_flow),
+                        )
+                        self.server.curve_designer_locked_times_ms = tuple(
+                            sorted(
+                                locked_time * old_period_scale
+                                for locked_time in locked_times
+                            )
+                        )
+                    else:
+                        raise ValueError(
+                            "control point action must be add, move, toggle_lock, or remove"
+                        )
+                self.server.waveform_program = program
+                self.server.curve_designer_waveform_program = program
+                if action in ("add", "move", "remove"):
+                    self._update_curve_fit_metrics()
+                self.server.curve_designer_modified = True
+                self._send_json({"ok": True, "telemetry": self._telemetry(now_s)})
                 return
 
             if self.path == "/api/simulator/interlocks":
@@ -383,9 +753,109 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
     def _send_error(self, status: int, message: str) -> None:
         self._send_json({"ok": False, "error": message}, status=status)
 
+    def _curve_control_point_index(self, time_ms: float) -> int:
+        program = self.server.waveform_program
+        if program is None or not isfinite(time_ms):
+            raise ValueError("control point time must be finite")
+        source_time_ms = time_ms / program.period_scale
+        point_index = min(
+            range(len(program.points)),
+            key=lambda index: abs(program.points[index].time_ms - source_time_ms),
+        )
+        tolerance_ms = max(1e-6, program.source_duration_ms * 1e-6)
+        if abs(program.points[point_index].time_ms - source_time_ms) > tolerance_ms:
+            raise ValueError("control point not found")
+        return point_index
+
+    def _activate_waveform_source(self, source: str) -> None:
+        programs = {
+            "pulsatile": self.server.pulsatile_waveform_program,
+            "curve_designer": self.server.curve_designer_waveform_program,
+        }
+        if source not in programs:
+            raise ValueError("waveform source must be pulsatile or curve_designer")
+        program = programs[source]
+        if program is None:
+            label = "pulsatile waveform" if source == "pulsatile" else "Curve Designer curve"
+            raise RuntimeError(f"load a {label} before selecting that mode")
+        self.server.waveform_source = source
+        self.server.waveform_program = program
+
+    def _cache_active_waveform(self) -> None:
+        if self.server.waveform_source == "pulsatile":
+            self.server.pulsatile_waveform_program = self.server.waveform_program
+        elif self.server.waveform_source == "curve_designer":
+            self.server.curve_designer_waveform_program = self.server.waveform_program
+
+    def _update_curve_fit_metrics(self) -> None:
+        source_program = self.server.curve_designer_source_program
+        program = self.server.waveform_program
+        fit_metadata = self.server.curve_designer_fit
+        if source_program is None or program is None or fit_metadata is None:
+            return
+        source_flow_scale = (
+            program.max_flow_ml_s / source_program.source_peak_flow_ml_s
+            if source_program.source_peak_flow_ml_s > 0.0
+            else 1.0
+        )
+        source_period_scale = program.period_ms / source_program.source_duration_ms
+        displayed_source_points = tuple(
+            WaveformPoint(
+                point.time_ms * source_period_scale,
+                point.flow_ml_s * source_flow_scale,
+            )
+            for point in source_program.points
+        )
+        displayed_control_points = tuple(
+            WaveformPoint(
+                point.time_ms * program.period_scale,
+                point.flow_ml_s * program.flow_scale,
+            )
+            for point in program.points
+        )
+        fit = control_point_fit_from_points(
+            displayed_source_points,
+            displayed_control_points,
+            interpolation=program.interpolation,
+            update_hz=self.server.waveform_update_hz,
+        )
+        fit_metadata.update(
+            source_point_count=fit.source_point_count,
+            max_error_ml_s=fit.max_error_ml_s,
+            rmse_ml_s=fit.rmse_ml_s,
+        )
+
     def _telemetry(self, now_s: float) -> dict[str, object]:
         hardware = self._hardware_telemetry()
         max_flow_ml_s = self._max_flow_ml_s(hardware)
+        curve_designer = None
+        if (
+            self.server.waveform_source == "curve_designer"
+            and self.server.curve_designer_fit is not None
+        ):
+            curve_designer = dict(self.server.curve_designer_fit)
+            curve_designer["modified"] = self.server.curve_designer_modified
+            reference_program = self.server.curve_designer_reference_program
+            if reference_program is not None:
+                source_flow_scale = (
+                    self.server.waveform_program.max_flow_ml_s
+                    / reference_program.source_peak_flow_ml_s
+                    if reference_program.source_peak_flow_ml_s > 0.0
+                    else 1.0
+                )
+                source_period_scale = (
+                    self.server.waveform_program.period_ms
+                    / reference_program.source_duration_ms
+                )
+                original_program = reference_program.with_scaling(
+                    source_flow_scale,
+                    source_period_scale,
+                )
+                original_json = original_program.to_json()
+                curve_designer["original_preview"] = original_json["preview"]
+                curve_designer["original_stroke_volume_ml"] = original_json[
+                    "total_stroke_volume_ml"
+                ]
         if hardware.get("connected") and hardware.get("fresh") and (
             hardware.get("fault_latched") or hardware.get("controlled_stop_active")
         ):
@@ -397,6 +867,22 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
         )
         telemetry["running"] = bool(telemetry.get("running")) or hardware_running
         telemetry["hardware"] = hardware
+        waveform_json = (
+            self.server.waveform_program.to_json(max_flow_ml_s)
+            if self.server.waveform_program is not None
+            else None
+        )
+        if (
+            waveform_json is not None
+            and self.server.waveform_source == "curve_designer"
+        ):
+            locked_times = set(self.server.curve_designer_locked_times_ms)
+            control_points = waveform_json["control_points"]
+            for index, point in enumerate(control_points):
+                point["locked"] = (
+                    self.server.waveform_program.points[index].time_ms in locked_times
+                )
+                point["endpoint"] = index in (0, len(control_points) - 1)
         telemetry["control"] = {
             "mode": self.server.control_mode,
             "flow_ml_s": self.server.flow_ml_s,
@@ -406,9 +892,13 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
             "waveform_update_hz": self.server.waveform_update_hz,
             "waveform_update_rates": list(WAVEFORM_UPDATE_RATES),
             "waveform_available": self.server.waveform_program is not None,
-            "waveform": self.server.waveform_program.to_json(max_flow_ml_s)
-            if self.server.waveform_program is not None
-            else None,
+            "pulsatile_waveform_available": self.server.pulsatile_waveform_program is not None,
+            "curve_designer_waveform_available": (
+                self.server.curve_designer_waveform_program is not None
+            ),
+            "waveform_source": self.server.waveform_source,
+            "waveform": waveform_json,
+            "curve_designer": curve_designer,
         }
         telemetry["system"] = derive_system_state(
             hardware,
@@ -436,7 +926,35 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
             if self.arduino is not None
             else {"connected": False, "last_error": "arduino serial bridge is disabled"}
         )
+        calibration = self.server.loaded_calibration_flows_ml_s
+        if calibration is not None:
+            hardware = dict(hardware)
+            hardware.update(
+                calibration_valid=True,
+                calibration_valid_mask=0b1111,
+                calibration_flows_ml_s=list(calibration),
+                calibration_loaded_locally=True,
+                calibration_pending_transfer=self.server.calibration_pending_transfer,
+            )
         return hardware
+
+    def _sync_loaded_calibration(
+        self, hardware: dict[str, object]
+    ) -> dict[str, object]:
+        calibration = self.server.loaded_calibration_flows_ml_s
+        if (
+            calibration is None
+            or not self.server.calibration_pending_transfer
+            or self.arduino is None
+            or not hardware.get("connected")
+            or not hardware.get("fresh")
+        ):
+            return hardware
+        self.arduino.load_calibration(calibration)
+        self.arduino.request_telemetry()
+        time.sleep(0.05)
+        self.server.calibration_pending_transfer = False
+        return self._hardware_telemetry()
 
     def _require_start_ready(self, hardware: dict[str, object]) -> None:
         if not hardware.get("connected"):
@@ -483,6 +1001,13 @@ def build_server(
     )
     server = CardiopumpServer((host, port), handler)
     server.arduino = handler.arduino
+    server.pulsatile_waveform_program = None
+    server.curve_designer_waveform_program = None
+    server.curve_designer_reference_program = None
+    server.curve_designer_baseline_program = None
+    server.curve_designer_baseline_locked_times_ms = ()
+    server.loaded_calibration_flows_ml_s = None
+    server.calibration_pending_transfer = False
     return server
 
 

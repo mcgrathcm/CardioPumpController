@@ -18,6 +18,28 @@ Current scope:
   a conservative `2.5 V`.
 - Pulsatile waveform files use two numeric columns, `time_ms` and signed
   `flow_ml_s`, in either comma-delimited CSV or whitespace-delimited text.
+- Curve Designer is a separate Flow mode that uses the same waveform execution
+  path. It starts as a two-point constant curve or fits 2–20 adaptively placed
+  control points from a waveform file. Shape-preserving cubic (PCHIP), linear,
+  and periodic-cubic interpolation are selectable; periodic cubic is smoothest but
+  may overshoot between points. PCHIP and periodic cubic match the start/end slope.
+  The first and last control-point markers share one flow value to close the cycle.
+  Loaded source curves remain visible as a faint
+  reference and can be refitted with a new point count using the number field and
+  +/- buttons; each count change resets the source scaling, stays editable, and
+  becomes the baseline used by Reset.
+  Maximum flow and period are adjustable, and the preview reports fitted and
+  scaled-original stroke volumes. Right-clicking on or near the fitted curve opens
+  an Add Point menu, while right-clicking a point highlights it and opens
+  lock/unlock and remove actions. Unlocked interior points can be dragged in time
+  and flow; endpoint times remain fixed, and locked points cannot be dragged. Drag
+  empty plot space to zoom; nearly horizontal or vertical drags show an end-capped
+  range and zoom one axis, while diagonal drags show a box.
+  Double-click restores the full view. Any manual edit
+  disables point-count refitting until Reset restores the selected baseline curve.
+  The current interpolated curve can be exported as a rasterized CSV, while a
+  separate JSON builder checkpoint preserves control points, locks, interpolation,
+  scaling, and period for later editing and reconstructs its saved default curve.
 - Waveforms are interpolated at a selectable `250` or `500 Hz` raster
   and transferred as signed Q15 values plus their physical peak flow. The
   Arduino applies the measured forward calibration by magnitude for both flow

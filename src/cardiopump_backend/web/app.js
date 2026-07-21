@@ -13,6 +13,7 @@ const state = {
   heartbeatInFlight: false,
   activeTab: "flow",
   activeFlowMode: "constant",
+  flowModeInitialized: false,
   calibrationVoltage: null,
   calibrationSelectedVoltage: 2.5,
   calibrationFileName: null,
@@ -20,6 +21,14 @@ const state = {
   calibrationRenderKey: null,
   waveformFileName: null,
   waveformRenderKey: null,
+  curveDesignerFileName: null,
+  curveDesignerRenderKey: null,
+  curveDesignerPlot: null,
+  curveDesignerView: null,
+  curveZoomDrag: null,
+  curvePointDrag: null,
+  curveSelectedPointTimeMs: null,
+  curvePointMenuTarget: null,
 };
 
 const DISABLE_CONFIRM_WINDOW_MS = 4000;
@@ -38,6 +47,7 @@ const elements = {
   dacStatus: document.querySelector("#dac-status"),
   constantModeButton: document.querySelector("#constant-mode-button"),
   waveformModeButton: document.querySelector("#waveform-mode-button"),
+  curveDesignerModeButton: document.querySelector("#curve-designer-mode-button"),
   flowInput: document.querySelector("#flow-input"),
   waveformFile: document.querySelector("#waveform-file"),
   waveformFileTitle: document.querySelector("#waveform-file-title"),
@@ -56,6 +66,32 @@ const elements = {
   waveformSamplesValue: document.querySelector("#waveform-samples-value"),
   waveformVolumeValue: document.querySelector("#waveform-volume-value"),
   waveformClippingValue: document.querySelector("#waveform-clipping-value"),
+  curveDesignerFile: document.querySelector("#curve-designer-file"),
+  curveDesignerFileTitle: document.querySelector("#curve-designer-file-title"),
+  curveDesignerFileHint: document.querySelector("#curve-designer-file-hint"),
+  curveControlPointCount: document.querySelector("#curve-control-point-count"),
+  curvePointCountDecrease: document.querySelector("#curve-point-count-decrease"),
+  curvePointCountIncrease: document.querySelector("#curve-point-count-increase"),
+  curveResetButton: document.querySelector("#curve-reset-button"),
+  curveUseConstantButton: document.querySelector("#curve-use-constant-button"),
+  saveCurveCsvButton: document.querySelector("#save-curve-csv-button"),
+  saveCurveCheckpointButton: document.querySelector("#save-curve-checkpoint-button"),
+  curveOriginalLegend: document.querySelector("#curve-original-legend"),
+  curveReferenceLabel: document.querySelector("#curve-reference-label"),
+  curveDesignerCanvas: document.querySelector("#curve-designer-canvas"),
+  curveDesignerState: document.querySelector("#curve-designer-state"),
+  curveDesignerStatus: document.querySelector("#curve-designer-status"),
+  curveControlPointsValue: document.querySelector("#curve-control-points-value"),
+  curveStrokeVolumeValue: document.querySelector("#curve-stroke-volume-value"),
+  curveMaxFlowInput: document.querySelector("#curve-max-flow-input"),
+  curvePeriodInput: document.querySelector("#curve-period-input"),
+  curveInterpolationSelect: document.querySelector("#curve-interpolation-select"),
+  curveInterpolationLabel: document.querySelector("#curve-interpolation-label"),
+  curveInterpolationNote: document.querySelector("#curve-interpolation-note"),
+  curvePointMenu: document.querySelector("#curve-point-menu"),
+  curvePointAddButton: document.querySelector("#curve-point-add-button"),
+  curvePointLockButton: document.querySelector("#curve-point-lock-button"),
+  curvePointRemoveButton: document.querySelector("#curve-point-remove-button"),
   constantFlowGauge: document.querySelector("#constant-flow-gauge"),
   constantFlowValue: document.querySelector("#constant-flow-value"),
   constantFlowLimit: document.querySelector("#constant-flow-limit"),
@@ -136,14 +172,20 @@ function setActiveTab(tabName) {
 
 function setActiveFlowMode(mode) {
   state.activeFlowMode = mode;
+  state.flowModeInitialized = true;
   elements.flowTabButtons.forEach((button) => {
     const active = button.dataset.flowMode === mode;
     button.classList.toggle("active", active);
     button.setAttribute("aria-selected", String(active));
     button.tabIndex = active ? 0 : -1;
   });
+  const panelIds = {
+    constant: "constant-flow-panel",
+    waveform: "pulsatile-flow-panel",
+    curve_designer: "curve-designer-flow-panel",
+  };
   elements.flowTabPanels.forEach((panel) => {
-    panel.hidden = panel.id !== `${mode === "constant" ? "constant" : "pulsatile"}-flow-panel`;
+    panel.hidden = panel.id !== panelIds[mode];
   });
 }
 
@@ -266,15 +308,24 @@ function renderTelemetry(telemetry) {
     state.disableConfirmUntilMs = 0;
   }
   const disablePending = state.disableConfirmUntilMs > Date.now();
-  const waveformAvailable = control.waveform_available === true;
-  const waveform = control.waveform || null;
+  const loadedWaveform = control.waveform || null;
+  const waveformSource = control.waveform_source || "pulsatile";
+  const waveform = waveformSource === "pulsatile" ? loadedWaveform : null;
+  const curveDesignerWaveform = waveformSource === "curve_designer" ? loadedWaveform : null;
+  const curveDesignerFit = control.curve_designer || null;
+  const waveformAvailable = waveform !== null;
+  const curveDesignerAvailable = curveDesignerWaveform !== null;
   const waveformMode = control.mode === "waveform";
+  const backendFlowMode = waveformMode
+    ? waveformSource === "curve_designer" ? "curve_designer" : "waveform"
+    : "constant";
 
-  if (waveformAvailable || waveformMode || state.activeFlowMode !== "waveform") {
-    setActiveFlowMode(waveformMode ? "waveform" : "constant");
+  if (!state.flowModeInitialized || running) {
+    setActiveFlowMode(backendFlowMode);
   }
   elements.constantModeButton.disabled = running || state.busy || controlsLocked;
   elements.waveformModeButton.disabled = running || state.busy || controlsLocked;
+  elements.curveDesignerModeButton.disabled = running || state.busy || controlsLocked;
   if (document.activeElement !== elements.flowInput && Number.isFinite(Number(control.flow_ml_s))) {
     elements.flowInput.value = Number(control.flow_ml_s).toFixed(2);
   }
@@ -290,13 +341,15 @@ function renderTelemetry(telemetry) {
   elements.constantFlowValue.textContent = constantFlow.toFixed(2);
   elements.constantFlowLimit.textContent = `0–${constantFlowLimit.toFixed(2)} mL/s`;
   elements.constantFlowMode.textContent = waveformMode
-    ? "Waveform selected"
+    ? waveformSource === "curve_designer" ? "Curve selected" : "Waveform selected"
     : running ? "Running" : "Stopped";
-  elements.constantCalibrationState.textContent = hardware.calibration_valid
+  elements.constantCalibrationState.textContent = hardware.calibration_pending_transfer
+    ? "Loaded locally"
+    : hardware.calibration_valid
     ? "Four-point calibration"
     : "Conservative limit";
   elements.constantOutputState.textContent = waveformMode
-    ? "Pulsatile mode"
+    ? waveformSource === "curve_designer" ? "Curve Designer mode" : "Pulsatile mode"
     : running ? "Running" : arduinoEnabled ? "Ready" : "Disabled";
   elements.flowInput.disabled = waveformMode || running || state.busy || !hardwareConnected || controlsLocked;
   elements.waveformFile.disabled = running || state.busy || controlsLocked;
@@ -309,6 +362,70 @@ function renderTelemetry(telemetry) {
   elements.waveformPeriodInput.disabled = running || state.busy || !waveformAvailable || controlsLocked;
   elements.clipNegativeFlowInput.disabled = running || state.busy || !waveformAvailable || controlsLocked;
   elements.resetWaveformDefaultsButton.disabled = running || state.busy || !waveformAvailable || controlsLocked;
+  elements.curveDesignerFile.disabled = running || state.busy || controlsLocked;
+  const curveSourceLoaded = ["file", "checkpoint"].includes(curveDesignerFit?.source);
+  const curvePointCountLocked = curveSourceLoaded && curveDesignerFit?.modified === true;
+  const curvePointCountDisabled = running || state.busy || controlsLocked || curvePointCountLocked;
+  const configuredControlPointCount = Number(curveDesignerFit?.initial_control_point_count);
+  if (
+    curveSourceLoaded
+    && document.activeElement !== elements.curveControlPointCount
+    && Number.isInteger(configuredControlPointCount)
+  ) {
+    elements.curveControlPointCount.value = String(configuredControlPointCount);
+  }
+  const selectedControlPointCount = Number(elements.curveControlPointCount.value);
+  elements.curveControlPointCount.disabled = curvePointCountDisabled;
+  elements.curvePointCountDecrease.disabled = curvePointCountDisabled || selectedControlPointCount <= 2;
+  elements.curvePointCountIncrease.disabled = curvePointCountDisabled || selectedControlPointCount >= 20;
+  const curvePointCountTitle = curvePointCountLocked
+    ? "Reset the curve before changing the point count."
+    : "";
+  elements.curveControlPointCount.title = curvePointCountTitle;
+  elements.curvePointCountDecrease.title = curvePointCountTitle;
+  elements.curvePointCountIncrease.title = curvePointCountTitle;
+  elements.curveResetButton.disabled =
+    running || state.busy || controlsLocked || !curveSourceLoaded;
+  elements.curveUseConstantButton.disabled = running || state.busy || controlsLocked;
+  elements.saveCurveCsvButton.disabled = state.busy || !curveDesignerAvailable;
+  elements.saveCurveCheckpointButton.disabled = state.busy || !curveDesignerAvailable;
+  elements.curveMaxFlowInput.disabled =
+    running || state.busy || !curveDesignerAvailable || controlsLocked;
+  elements.curvePeriodInput.disabled =
+    running || state.busy || !curveDesignerAvailable || controlsLocked;
+  elements.curveInterpolationSelect.disabled =
+    running || state.busy || !curveDesignerAvailable || controlsLocked;
+  const curveInterpolation = curveDesignerWaveform?.interpolation || "pchip";
+  if (document.activeElement !== elements.curveInterpolationSelect) {
+    elements.curveInterpolationSelect.value = curveInterpolation;
+  }
+  const interpolationDetails = {
+    pchip: {
+      label: "PCHIP",
+      note: "PCHIP avoids overshoot and matches the slope at the cycle boundary.",
+    },
+    linear: {
+      label: "Linear",
+      note: "Linear interpolation connects points directly with no overshoot.",
+    },
+    cubic: {
+      label: "Periodic cubic",
+      note: "Periodic cubic matches the slope at the cycle boundary, but it can overshoot between points.",
+    },
+  }[curveInterpolation] || { label: curveInterpolation, note: "" };
+  elements.curveInterpolationLabel.textContent = interpolationDetails.label;
+  elements.curveInterpolationNote.textContent = interpolationDetails.note;
+  elements.curveOriginalLegend.hidden = !curveSourceLoaded;
+  elements.curveReferenceLabel.textContent = curveDesignerFit?.source === "checkpoint"
+    ? "Default curve"
+    : "Original curve";
+  elements.curveDesignerFileTitle.textContent = state.curveDesignerFileName
+    || "Choose a curve CSV or builder checkpoint";
+  elements.curveDesignerFileHint.textContent = state.curveDesignerFileName
+    ? curveDesignerFit?.source === "checkpoint"
+      ? "Checkpoint restored. Click to load another curve or checkpoint."
+      : "Click to fit a new file using the selected point count."
+    : `The next file will be fitted with ${elements.curveControlPointCount.value} control points.`;
   const waveformUpdateHz = Number(control.waveform_update_hz) || 250;
   if (document.activeElement !== elements.waveformRateToggle) {
     elements.waveformRateToggle.checked = waveformUpdateHz === 500;
@@ -324,7 +441,9 @@ function renderTelemetry(telemetry) {
   if (Number.isFinite(waveformFlowLimit)) {
     elements.waveformMaxFlowInput.removeAttribute("max");
     const exceedsFlowLimit = Number(waveform?.max_flow_ml_s) > waveformFlowLimit;
-    const limitName = hardware.calibration_valid
+    const limitName = hardware.calibration_pending_transfer
+      ? "locally loaded calibration limit"
+      : hardware.calibration_valid
       ? "loaded calibration limit"
       : "conservative uncalibrated limit";
     elements.waveformFlowLimitNote.textContent = exceedsFlowLimit
@@ -341,6 +460,22 @@ function renderTelemetry(telemetry) {
     || 1000 / Number(control.waveform_update_hz || 250);
   elements.waveformPeriodInput.min = String(rasterPeriodMs);
   elements.waveformPeriodInput.step = String(rasterPeriodMs);
+  if (
+    document.activeElement !== elements.curveMaxFlowInput
+    && Number.isFinite(Number(curveDesignerWaveform?.max_flow_ml_s))
+  ) {
+    elements.curveMaxFlowInput.value = Number(curveDesignerWaveform.max_flow_ml_s).toFixed(2);
+  }
+  if (
+    document.activeElement !== elements.curvePeriodInput
+    && Number.isFinite(Number(curveDesignerWaveform?.period_ms))
+  ) {
+    elements.curvePeriodInput.value = Math.round(Number(curveDesignerWaveform.period_ms));
+  }
+  const curveRasterPeriodMs = Number(curveDesignerWaveform?.raster_period_ms)
+    || 1000 / Number(control.waveform_update_hz || 250);
+  elements.curvePeriodInput.min = String(curveRasterPeriodMs);
+  elements.curvePeriodInput.step = String(curveRasterPeriodMs);
   if (waveform) {
     elements.clipNegativeFlowInput.checked = waveform.clip_negative_flow === true;
   } else {
@@ -401,6 +536,12 @@ function renderTelemetry(telemetry) {
   }
   renderCalibration(hardware, telemetry);
   renderWaveformIfChanged(waveform, hardware, running && waveformMode);
+  renderCurveDesignerIfChanged(
+    curveDesignerWaveform,
+    curveDesignerFit,
+    hardware,
+    running && waveformMode && waveformSource === "curve_designer",
+  );
 
   renderTimingDiagnostics(hardware, running && waveformMode);
   renderControllerDiagnostics(hardware);
@@ -429,14 +570,15 @@ function renderTelemetry(telemetry) {
     : starting
     ? "Stop Ramp"
     : running ? "Stop" : "Start";
+  const activeModeReady = running || state.activeFlowMode === backendFlowMode;
   elements.mainStartButton.className = stopping
     ? "big-button disabled"
     : running
     ? "big-button danger"
-    : canStart(telemetry)
+    : canStart(telemetry) && activeModeReady
       ? "big-button start"
       : "big-button disabled";
-  elements.mainStartButton.disabled = stopping || (!running && !canStart(telemetry));
+  elements.mainStartButton.disabled = stopping || (!running && (!canStart(telemetry) || !activeModeReady));
 
   setControlsEnabled(hardwareConnected && !state.busy && !controlsLocked);
 
@@ -566,6 +708,8 @@ function renderCalibration(hardware, telemetry) {
     elements.calibrationStatus.textContent = `Running: ${formatFaultReason(hardware.calibration_stage)}`;
   } else if (complete) {
     elements.calibrationStatus.textContent = "Measurement required";
+  } else if (hardware.calibration_pending_transfer === true) {
+    elements.calibrationStatus.textContent = "4-point calibration loaded locally";
   } else if (hardware.calibration_valid === true) {
     elements.calibrationStatus.textContent = "4-point calibration active";
   } else {
@@ -577,17 +721,21 @@ function renderCalibration(hardware, telemetry) {
     active || complete || state.busy
     || !elements.calibrationConfirmInput.checked || !canStart(telemetry);
   elements.calibrationConfirmInput.disabled = active || complete || state.busy;
-  elements.calibrationFile.disabled = active || telemetry.running === true || state.busy
-    || telemetry.hardware?.connected !== true || telemetry.hardware?.fresh !== true;
+  elements.calibrationFile.disabled = active || telemetry.running === true || state.busy;
   elements.calibrationFileTitle.textContent = state.calibrationFileName
     || "Load four measured flow values";
   elements.calibrationFileHint.textContent = state.calibrationFileName
-    ? "Click to load new file"
+    ? hardware.calibration_pending_transfer
+      ? "Loaded locally; the Arduino has not been updated."
+      : "Click to load new file"
     : "Points must correspond to 2.5, 5, 7.5, and 10 V.";
   elements.calibrationMeasurement.hidden = !complete;
   elements.calibrationSaveButton.disabled = state.busy || !complete;
   elements.calibrationExportButton.disabled = state.busy || hardware.calibration_valid !== true;
-  elements.calibrationClearButton.disabled = state.busy || active || validMask === 0;
+  const canClearCalibration = hardware.calibration_pending_transfer === true
+    || (hardware.connected === true && hardware.fresh === true);
+  elements.calibrationClearButton.disabled =
+    state.busy || active || validMask === 0 || !canClearCalibration;
   if (Date.now() > state.calibrationClearConfirmUntilMs) {
     state.calibrationClearConfirmUntilMs = 0;
     elements.calibrationClearButton.textContent = "Clear Calibration";
@@ -727,6 +875,16 @@ function renderDisconnected(error) {
   elements.waveformPeriodInput.disabled = true;
   elements.clipNegativeFlowInput.disabled = true;
   elements.resetWaveformDefaultsButton.disabled = true;
+  elements.curveDesignerFile.disabled = true;
+  elements.curveControlPointCount.disabled = true;
+  elements.curvePointCountDecrease.disabled = true;
+  elements.curvePointCountIncrease.disabled = true;
+  elements.curveInterpolationSelect.disabled = true;
+  elements.curveResetButton.disabled = true;
+  elements.curveUseConstantButton.disabled = true;
+  elements.saveCurveCsvButton.disabled = true;
+  elements.saveCurveCheckpointButton.disabled = true;
+  elements.curveOriginalLegend.hidden = true;
   elements.triggerHighMsInput.disabled = true;
   elements.waveformRateToggle.disabled = true;
   elements.waveformRasterNote.hidden = true;
@@ -758,6 +916,12 @@ function renderDisconnected(error) {
   elements.waveformClippingValue.className = "clip-status";
   state.waveformRenderKey = null;
   drawWaveform(null, {}, false);
+  elements.curveDesignerState.textContent = "Unavailable";
+  elements.curveDesignerStatus.textContent = "Curve Designer unavailable while disconnected.";
+  elements.curveControlPointsValue.textContent = "—";
+  elements.curveStrokeVolumeValue.textContent = "—";
+  state.curveDesignerRenderKey = null;
+  drawWaveform(null, {}, false, elements.curveDesignerCanvas, true);
   setControlsEnabled(false);
 }
 
@@ -769,6 +933,7 @@ function renderWaveformIfChanged(waveform, hardware, active) {
         waveform.applied_max_flow_ml_s,
         waveform.flow_limit_ml_s,
         waveform.period_ms,
+        waveform.interpolation,
         waveform.clip_negative_flow,
         waveform.clipped_sample_count,
         waveform.negative_clipped_sample_count,
@@ -782,8 +947,76 @@ function renderWaveformIfChanged(waveform, hardware, active) {
   drawWaveform(waveform, hardware, active);
 }
 
-function drawWaveform(waveform, hardware = {}, active = false) {
-  const canvas = elements.waveformCanvas;
+function renderCurveDesignerIfChanged(waveform, fit, hardware, active) {
+  const controlPoints = waveform?.control_points || [];
+  const source = fit?.source || null;
+  elements.curveDesignerState.textContent = source === "checkpoint"
+    ? fit?.modified ? "Modified checkpoint" : "Checkpoint"
+    : source === "file"
+    ? fit?.modified ? "Modified file fit" : "File fit"
+    : waveform ? "Two-point constant" : "Not initialized";
+  elements.curveControlPointsValue.textContent = waveform ? String(controlPoints.length) : "—";
+  elements.curveStrokeVolumeValue.textContent = waveform
+    ? `${Number(waveform.total_stroke_volume_ml).toFixed(2)} mL`
+    : "—";
+  elements.curveDesignerStatus.textContent = source === "checkpoint"
+    ? `${controlPoints.length}-point builder checkpoint restored with ${waveform.interpolation} interpolation. `
+      + `Default stroke volume ${Number(fit.original_stroke_volume_ml).toFixed(2)} mL.`
+    : source === "file"
+    ? `${controlPoints.length} control points fitted from ${fit.source_point_count} source points. `
+      + `RMSE ${Number(fit.rmse_ml_s).toFixed(3)} mL/s; maximum error ${Number(fit.max_error_ml_s).toFixed(3)} mL/s; `
+      + `original stroke volume ${Number(fit.original_stroke_volume_ml).toFixed(2)} mL.`
+    : waveform
+      ? `Flat ${Number(controlPoints[0]?.flow_ml_s || 0).toFixed(2)} mL/s curve with ${controlPoints.length} control points.`
+      : "Select Curve Designer to initialize a flat two-point curve.";
+
+  const renderKey = waveform
+    ? [
+        waveform.sample_count,
+        waveform.max_flow_ml_s,
+        waveform.applied_max_flow_ml_s,
+        waveform.flow_limit_ml_s,
+        waveform.period_ms,
+        waveform.interpolation,
+        waveform.clipped_sample_count,
+        fit?.original_preview?.length || 0,
+        controlPoints.map((point) => (
+          `${point.time_ms}:${point.flow_ml_s}:${point.clipped}:${point.locked}`
+        )).join("|"),
+        JSON.stringify(state.curveDesignerView),
+        state.curveSelectedPointTimeMs,
+        state.curvePointDrag
+          ? `${state.curvePointDrag.currentX}:${state.curvePointDrag.currentY}`
+          : "",
+        active ? Number(hardware.wave_index) || 0 : -1,
+      ].join(":")
+    : "empty";
+  if (renderKey === state.curveDesignerRenderKey) {
+    return;
+  }
+  state.curveDesignerRenderKey = renderKey;
+  drawWaveform(
+    waveform,
+    hardware,
+    active,
+    elements.curveDesignerCanvas,
+    true,
+    fit?.original_preview || [],
+  );
+}
+
+function drawWaveform(
+  waveform,
+  hardware = {},
+  active = false,
+  canvas = elements.waveformCanvas,
+  showControlPoints = false,
+  originalPreview = [],
+) {
+  const isCurveDesigner = canvas === elements.curveDesignerCanvas;
+  if (isCurveDesigner) {
+    state.curveDesignerPlot = null;
+  }
   const context = canvas.getContext("2d");
   const width = canvas.width;
   const height = canvas.height;
@@ -798,18 +1031,43 @@ function drawWaveform(waveform, hardware = {}, active = false) {
   const plotWidth = width - paddingLeft - paddingRight;
   const plotHeight = height - paddingTop - paddingBottom;
   const preview = waveform?.preview || [];
-  const previewFlows = preview.map((point) => Number(point.flow_ml_s ?? point.flow) || 0);
+  const previewFlows = [
+    ...preview,
+    ...originalPreview,
+    ...(showControlPoints ? waveform?.control_points || [] : []),
+  ]
+    .map((point) => Number(point.flow_ml_s ?? point.flow) || 0);
   const minimumFlow = previewFlows.length ? Math.min(...previewFlows) : 0;
   const maximumFlow = previewFlows.length ? Math.max(...previewFlows) : 0;
-  const hasReverseFlow = minimumFlow < -1e-9;
-  const plotLimit = Math.max(
-    Math.abs(minimumFlow),
-    Math.abs(maximumFlow),
-    Math.abs(Number(waveform?.max_flow_ml_s) || 0),
-    0.001,
+  const calibratedMaximumFlow = Number(waveform?.flow_limit_ml_s);
+  const axisMaximumFlow = isCurveDesigner && Number.isFinite(calibratedMaximumFlow)
+    ? Math.max(maximumFlow, calibratedMaximumFlow)
+    : maximumFlow;
+  const flowRange = axisMaximumFlow - minimumFlow;
+  const flowPadding = flowRange > 1e-9
+    ? flowRange / 20
+    : Math.max(Math.abs(axisMaximumFlow) / 20, 0.001);
+  const fullPlotMinimum = minimumFlow - flowPadding;
+  const fullPlotMaximum = axisMaximumFlow + flowPadding;
+  const duration = Math.max(
+    Number(waveform?.duration_s) || 1,
+    Number(preview[preview.length - 1]?.time_s) || 1,
   );
-  const plotMinimum = hasReverseFlow ? -plotLimit : 0;
-  const plotMaximum = plotLimit;
+  const requestedView = isCurveDesigner ? state.curveDesignerView : null;
+  const view = requestedView
+    && requestedView.xMax > requestedView.xMin
+    && requestedView.yMax > requestedView.yMin
+    ? requestedView
+    : {
+        xMin: 0,
+        xMax: duration,
+        yMin: fullPlotMinimum,
+        yMax: fullPlotMaximum,
+      };
+  const plotMinimum = view.yMin;
+  const plotMaximum = view.yMax;
+  const xFor = (timeS) => paddingLeft
+    + (timeS - view.xMin) / (view.xMax - view.xMin) * plotWidth;
   const yFor = (flow) => paddingTop
     + (1 - (flow - plotMinimum) / (plotMaximum - plotMinimum)) * plotHeight;
 
@@ -841,20 +1099,49 @@ function drawWaveform(waveform, hardware = {}, active = false) {
     context.textAlign = "center";
     context.textBaseline = "middle";
     context.font = "600 14px system-ui, sans-serif";
-    context.fillText("Load a waveform to preview the command", width / 2, height / 2 - 8);
+    context.fillText(
+      showControlPoints ? "Initialize or load a curve to preview the fit" : "Load a waveform to preview the command",
+      width / 2,
+      height / 2 - 8,
+    );
     context.fillStyle = "#98a3af";
     context.font = "11px system-ui, sans-serif";
-    context.fillText("Two-column text or CSV: time and normalized flow", width / 2, height / 2 + 14);
+    context.fillText("Two-column text or CSV: time and flow", width / 2, height / 2 + 14);
     return;
   }
 
-  const duration = Math.max(Number(waveform.duration_s) || 1, preview[preview.length - 1].time_s || 1);
-  const xFor = (timeS) => paddingLeft + (timeS / duration) * plotWidth;
+  if (isCurveDesigner) {
+    state.curveDesignerPlot = {
+      duration,
+      paddingLeft,
+      paddingRight,
+      paddingTop,
+      paddingBottom,
+      plotWidth,
+      plotHeight,
+      view: { ...view },
+      fullView: {
+        xMin: 0,
+        xMax: duration,
+        yMin: fullPlotMinimum,
+        yMax: fullPlotMaximum,
+      },
+      curvePoints: preview.map((point) => ({
+        canvasX: xFor(Number(point.time_s) || 0),
+        canvasY: yFor(Number(point.flow_ml_s ?? point.flow) || 0),
+      })),
+      controlPoints: (waveform.control_points || []).map((point) => ({
+        ...point,
+        canvasX: xFor(Number(point.time_s) || 0),
+        canvasY: yFor(Number(point.flow_ml_s ?? point.flow) || 0),
+      })),
+    };
+  }
   const zeroY = yFor(0);
   const waveformPath = new Path2D();
   preview.forEach((point, index) => {
     const x = xFor(point.time_s);
-    const flow = Math.max(plotMinimum, Math.min(plotMaximum, Number(point.flow_ml_s ?? point.flow) || 0));
+    const flow = Number(point.flow_ml_s ?? point.flow) || 0;
     const y = yFor(flow);
     if (index === 0) {
       waveformPath.moveTo(x, y);
@@ -870,8 +1157,30 @@ function drawWaveform(waveform, hardware = {}, active = false) {
   const fillGradient = context.createLinearGradient(0, paddingTop, 0, height - paddingBottom);
   fillGradient.addColorStop(0, "rgba(40, 163, 166, 0.26)");
   fillGradient.addColorStop(1, "rgba(40, 163, 166, 0.02)");
+  context.save();
+  context.beginPath();
+  context.rect(paddingLeft, paddingTop, plotWidth, plotHeight);
+  context.clip();
   context.fillStyle = fillGradient;
   context.fill(fillPath);
+
+  if (originalPreview.length) {
+    const originalPath = new Path2D();
+    originalPreview.forEach((point, index) => {
+      const x = xFor(Number(point.time_s) || 0);
+      const flow = Number(point.flow_ml_s ?? point.flow) || 0;
+      if (index === 0) {
+        originalPath.moveTo(x, yFor(flow));
+      } else {
+        originalPath.lineTo(x, yFor(flow));
+      }
+    });
+    context.strokeStyle = "rgba(117, 130, 149, 0.48)";
+    context.lineWidth = 2;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    context.stroke(originalPath);
+  }
 
   context.strokeStyle = "#16868b";
   context.lineWidth = 3;
@@ -882,11 +1191,84 @@ function drawWaveform(waveform, hardware = {}, active = false) {
   context.fillStyle = "#b42f3b";
   preview.filter((point) => point.clipped).forEach((point) => {
     const x = xFor(point.time_s);
-    const flow = Math.max(plotMinimum, Math.min(plotMaximum, Number(point.flow_ml_s ?? point.flow) || 0));
+    const flow = Number(point.flow_ml_s ?? point.flow) || 0;
     context.beginPath();
     context.arc(x, yFor(flow), 4, 0, Math.PI * 2);
     context.fill();
   });
+
+  if (showControlPoints) {
+    const controlPoints = waveform.control_points || [];
+    const pointDrag = state.curvePointDrag;
+    const draggingPeriodicEndpoint = pointDrag
+      && (pointDrag.pointIndex === 0
+        || pointDrag.pointIndex === controlPoints.length - 1);
+    if (pointDrag) {
+      context.strokeStyle = "rgba(47, 98, 163, 0.65)";
+      context.lineWidth = 2;
+      context.setLineDash([5, 4]);
+      context.beginPath();
+      const leftPoint = controlPoints[pointDrag.pointIndex - 1];
+      const rightPoint = controlPoints[pointDrag.pointIndex + 1];
+      if (draggingPeriodicEndpoint) {
+        const secondPoint = controlPoints[1];
+        const penultimatePoint = controlPoints[controlPoints.length - 2];
+        context.moveTo(xFor(Number(controlPoints[0].time_s) || 0), pointDrag.currentY);
+        context.lineTo(
+          xFor(Number(secondPoint.time_s) || 0),
+          yFor(Number(secondPoint.flow_ml_s ?? secondPoint.flow) || 0),
+        );
+        context.moveTo(
+          xFor(Number(penultimatePoint.time_s) || 0),
+          yFor(Number(penultimatePoint.flow_ml_s ?? penultimatePoint.flow) || 0),
+        );
+        context.lineTo(
+          xFor(Number(controlPoints[controlPoints.length - 1].time_s) || 0),
+          pointDrag.currentY,
+        );
+      } else if (leftPoint) {
+        context.moveTo(
+          xFor(Number(leftPoint.time_s) || 0),
+          yFor(Number(leftPoint.flow_ml_s ?? leftPoint.flow) || 0),
+        );
+        context.lineTo(pointDrag.currentX, pointDrag.currentY);
+      }
+      if (!draggingPeriodicEndpoint && rightPoint) {
+        context.moveTo(pointDrag.currentX, pointDrag.currentY);
+        context.lineTo(
+          xFor(Number(rightPoint.time_s) || 0),
+          yFor(Number(rightPoint.flow_ml_s ?? rightPoint.flow) || 0),
+        );
+      }
+      context.stroke();
+      context.setLineDash([]);
+      context.beginPath();
+      context.arc(pointDrag.originalX, pointDrag.originalY, 4, 0, Math.PI * 2);
+      context.fillStyle = "rgba(117, 130, 149, 0.45)";
+      context.fill();
+    }
+    context.lineWidth = 3;
+    controlPoints.forEach((point, pointIndex) => {
+      const linkedEndpoint = draggingPeriodicEndpoint
+        && (pointIndex === 0 || pointIndex === controlPoints.length - 1);
+      const dragging = pointDrag?.pointIndex === pointIndex || linkedEndpoint;
+      const x = pointDrag?.pointIndex === pointIndex
+        ? pointDrag.currentX
+        : xFor(Number(point.time_s) || 0);
+      const flow = Number(point.flow_ml_s ?? point.flow) || 0;
+      const y = dragging ? pointDrag.currentY : yFor(flow);
+      const selected = state.curveSelectedPointTimeMs !== null
+        && Math.abs(Number(point.time_ms) - state.curveSelectedPointTimeMs) < 1e-6;
+      context.beginPath();
+      context.arc(x, y, dragging ? 7 : 6, 0, Math.PI * 2);
+      context.fillStyle = selected || dragging
+        ? "#2f62a3"
+        : point.locked ? "#d29425" : "#ffffff";
+      context.fill();
+      context.strokeStyle = selected || dragging ? "#1d4679" : "#d29425";
+      context.stroke();
+    });
+  }
 
   context.strokeStyle = "#d29425";
   context.lineWidth = 2;
@@ -900,7 +1282,7 @@ function drawWaveform(waveform, hardware = {}, active = false) {
   const waveSamples = Number(hardware.wave_samples) || Number(waveform.sample_count) || 0;
   if (active && waveSamples > 0) {
     const waveIndex = Math.max(0, Math.min(Number(hardware.wave_index) || 0, waveSamples - 1));
-    const playheadX = paddingLeft + waveIndex / Math.max(1, waveSamples - 1) * plotWidth;
+    const playheadX = xFor(waveIndex / Math.max(1, waveSamples - 1) * duration);
     context.strokeStyle = "#183a4d";
     context.lineWidth = 2;
     context.beginPath();
@@ -912,16 +1294,428 @@ function drawWaveform(waveform, hardware = {}, active = false) {
     context.arc(playheadX, paddingTop + 5, 5, 0, Math.PI * 2);
     context.fill();
   }
+  context.restore();
+
+  if (isCurveDesigner && state.curveZoomDrag) {
+    const { startX, startY, currentX, currentY } = state.curveZoomDrag;
+    const left = Math.min(startX, currentX);
+    const top = Math.min(startY, currentY);
+    const boxWidth = Math.abs(currentX - startX);
+    const boxHeight = Math.abs(currentY - startY);
+    context.strokeStyle = "#2f62a3";
+    context.lineWidth = 1.5;
+    if (boxWidth >= 3 * boxHeight) {
+      context.fillStyle = "rgba(47, 98, 163, 0.12)";
+      context.fillRect(paddingLeft, paddingTop, left - paddingLeft, plotHeight);
+      context.fillRect(left + boxWidth, paddingTop, paddingLeft + plotWidth - left - boxWidth, plotHeight);
+      context.beginPath();
+      context.moveTo(left, currentY - 7);
+      context.lineTo(left, currentY + 7);
+      context.moveTo(left, currentY);
+      context.lineTo(left + boxWidth, currentY);
+      context.moveTo(left + boxWidth, currentY - 7);
+      context.lineTo(left + boxWidth, currentY + 7);
+      context.stroke();
+    } else if (boxHeight >= 3 * boxWidth) {
+      context.fillStyle = "rgba(47, 98, 163, 0.12)";
+      context.fillRect(paddingLeft, paddingTop, plotWidth, top - paddingTop);
+      context.fillRect(paddingLeft, top + boxHeight, plotWidth, paddingTop + plotHeight - top - boxHeight);
+      context.beginPath();
+      context.moveTo(currentX - 7, top);
+      context.lineTo(currentX + 7, top);
+      context.moveTo(currentX, top);
+      context.lineTo(currentX, top + boxHeight);
+      context.moveTo(currentX - 7, top + boxHeight);
+      context.lineTo(currentX + 7, top + boxHeight);
+      context.stroke();
+    } else {
+      context.fillStyle = "rgba(47, 98, 163, 0.14)";
+      context.fillRect(left, top, boxWidth, boxHeight);
+      context.setLineDash([5, 4]);
+      context.strokeRect(left, top, boxWidth, boxHeight);
+      context.setLineDash([]);
+    }
+  }
 
   context.fillStyle = "#758295";
   context.font = "11px system-ui, sans-serif";
   context.textAlign = "left";
   context.textBaseline = "alphabetic";
-  context.fillText("0 s", paddingLeft, height - 12);
+  context.fillText(`${view.xMin.toFixed(2)} s`, paddingLeft, height - 12);
   context.textAlign = "center";
-  context.fillText(`${(duration / 2).toFixed(2)} s`, paddingLeft + plotWidth / 2, height - 12);
+  context.fillText(`${((view.xMin + view.xMax) / 2).toFixed(2)} s`, paddingLeft + plotWidth / 2, height - 12);
   context.textAlign = "right";
-  context.fillText(`${duration.toFixed(2)} s`, width - paddingRight, height - 12);
+  context.fillText(`${view.xMax.toFixed(2)} s`, width - paddingRight, height - 12);
+}
+
+function redrawCurveDesignerCanvas() {
+  const telemetry = state.telemetry;
+  const control = telemetry?.control;
+  if (!control) {
+    return;
+  }
+  state.curveDesignerRenderKey = null;
+  renderCurveDesignerIfChanged(
+    control.waveform,
+    control.curve_designer,
+    telemetry.hardware || {},
+    telemetry.running === true && control.mode === "waveform",
+  );
+}
+
+function hideCurvePointMenu(clearSelection = true) {
+  const selectionChanged = clearSelection && state.curveSelectedPointTimeMs !== null;
+  elements.curvePointMenu.hidden = true;
+  state.curvePointMenuTarget = null;
+  if (clearSelection) {
+    state.curveSelectedPointTimeMs = null;
+  }
+  if (selectionChanged) {
+    redrawCurveDesignerCanvas();
+  }
+}
+
+function showCurvePointMenu(point, clientX, clientY) {
+  state.curvePointMenuTarget = { type: "point", point };
+  state.curveSelectedPointTimeMs = Number(point.time_ms);
+  elements.curvePointAddButton.hidden = true;
+  elements.curvePointLockButton.hidden = false;
+  elements.curvePointRemoveButton.hidden = false;
+  elements.curvePointLockButton.textContent = point.locked ? "Unlock point" : "Lock point";
+  elements.curvePointRemoveButton.disabled = point.endpoint === true;
+  elements.curvePointRemoveButton.title = point.endpoint
+    ? "The first and last points define the curve period."
+    : "";
+  positionCurvePointMenu(clientX, clientY);
+  redrawCurveDesignerCanvas();
+}
+
+function showCurveAddMenu(timeMs, clientX, clientY) {
+  state.curvePointMenuTarget = { type: "add", timeMs };
+  state.curveSelectedPointTimeMs = null;
+  elements.curvePointAddButton.hidden = false;
+  elements.curvePointLockButton.hidden = true;
+  elements.curvePointRemoveButton.hidden = true;
+  positionCurvePointMenu(clientX, clientY);
+}
+
+function positionCurvePointMenu(clientX, clientY) {
+  elements.curvePointMenu.hidden = false;
+  const frame = elements.curveDesignerCanvas.parentElement;
+  const frameRect = frame.getBoundingClientRect();
+  const menuWidth = elements.curvePointMenu.offsetWidth;
+  const menuHeight = elements.curvePointMenu.offsetHeight;
+  elements.curvePointMenu.style.left = `${Math.max(
+    6,
+    Math.min(clientX - frameRect.left, frameRect.width - menuWidth - 6),
+  )}px`;
+  elements.curvePointMenu.style.top = `${Math.max(
+    6,
+    Math.min(clientY - frameRect.top, frameRect.height - menuHeight - 6),
+  )}px`;
+}
+
+function curveCanvasCoordinates(event) {
+  const canvasRect = elements.curveDesignerCanvas.getBoundingClientRect();
+  return {
+    x: (event.clientX - canvasRect.left) * elements.curveDesignerCanvas.width / canvasRect.width,
+    y: (event.clientY - canvasRect.top) * elements.curveDesignerCanvas.height / canvasRect.height,
+    scale: Math.max(
+      elements.curveDesignerCanvas.width / canvasRect.width,
+      elements.curveDesignerCanvas.height / canvasRect.height,
+    ),
+  };
+}
+
+function pointInsideCurvePlot(point, plot) {
+  return point.x >= plot.paddingLeft
+    && point.x <= plot.paddingLeft + plot.plotWidth
+    && point.y >= plot.paddingTop
+    && point.y <= plot.paddingTop + plot.plotHeight;
+}
+
+function distanceToSegment(point, start, end) {
+  const dx = end.canvasX - start.canvasX;
+  const dy = end.canvasY - start.canvasY;
+  const lengthSquared = dx * dx + dy * dy;
+  if (lengthSquared === 0) {
+    return Math.hypot(point.x - start.canvasX, point.y - start.canvasY);
+  }
+  const fraction = Math.max(0, Math.min(1,
+    ((point.x - start.canvasX) * dx + (point.y - start.canvasY) * dy) / lengthSquared,
+  ));
+  return Math.hypot(
+    point.x - (start.canvasX + fraction * dx),
+    point.y - (start.canvasY + fraction * dy),
+  );
+}
+
+function distanceToCurve(point, curvePoints) {
+  let distance = Number.POSITIVE_INFINITY;
+  for (let index = 1; index < curvePoints.length; index += 1) {
+    distance = Math.min(distance, distanceToSegment(point, curvePoints[index - 1], curvePoints[index]));
+  }
+  return distance;
+}
+
+async function editCurveControlPoint(action, timeMs, wasLocked = false) {
+  hideCurvePointMenu();
+  state.busy = true;
+  try {
+    const payload = await postJson("/api/curve-designer/control-point", {
+      action,
+      time_ms: timeMs,
+    });
+    state.curveDesignerRenderKey = null;
+    renderTelemetry(payload.telemetry);
+    if (action === "add") {
+      elements.controlMessage.textContent = `Control point added at ${(timeMs / 1000).toFixed(3)} s.`;
+    } else if (action === "remove") {
+      elements.controlMessage.textContent = "Control point removed.";
+    } else {
+      elements.controlMessage.textContent = wasLocked
+        ? "Control point unlocked. Reset the curve to re-enable point-count selection."
+        : "Control point locked. Reset the curve to re-enable point-count selection.";
+    }
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function moveCurveControlPoint(timeMs, newTimeMs, newFlowMlS) {
+  state.busy = true;
+  try {
+    const payload = await postJson("/api/curve-designer/control-point", {
+      action: "move",
+      time_ms: timeMs,
+      new_time_ms: newTimeMs,
+      new_flow_ml_s: newFlowMlS,
+    });
+    state.curveDesignerRenderKey = null;
+    renderTelemetry(payload.telemetry);
+    elements.controlMessage.textContent =
+      `Control point moved to ${(newTimeMs / 1000).toFixed(3)} s, ${newFlowMlS.toFixed(2)} mL/s.`;
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function handleCurveDesignerContextMenu(event) {
+  event.preventDefault();
+  hideCurvePointMenu();
+  const waveform = state.telemetry?.control?.waveform;
+  const plot = state.curveDesignerPlot;
+  if (
+    state.busy
+    || state.telemetry?.running === true
+    || state.telemetry?.control?.waveform_source !== "curve_designer"
+    || !waveform
+    || !plot
+  ) {
+    return;
+  }
+
+  const canvasPoint = curveCanvasCoordinates(event);
+  if (!pointInsideCurvePlot(canvasPoint, plot)) {
+    return;
+  }
+
+  const hitRadius = 12 * canvasPoint.scale;
+  const closestPoint = plot.controlPoints.reduce((closest, point) => {
+    const distance = Math.hypot(canvasPoint.x - point.canvasX, canvasPoint.y - point.canvasY);
+    return !closest || distance < closest.distance ? { point, distance } : closest;
+  }, null);
+  if (closestPoint && closestPoint.distance <= hitRadius) {
+    showCurvePointMenu(closestPoint.point, event.clientX, event.clientY);
+    return;
+  }
+
+  if (distanceToCurve(canvasPoint, plot.curvePoints) > hitRadius) {
+    return;
+  }
+  const timeMs = (
+    plot.view.xMin
+    + (canvasPoint.x - plot.paddingLeft) / plot.plotWidth * (plot.view.xMax - plot.view.xMin)
+  ) * 1000;
+  showCurveAddMenu(timeMs, event.clientX, event.clientY);
+}
+
+function handleCurveZoomPointerDown(event) {
+  if (
+    event.button !== 0
+    || state.busy
+    || state.telemetry?.running === true
+    || state.telemetry?.control?.waveform_source !== "curve_designer"
+    || !state.curveDesignerPlot
+  ) {
+    return;
+  }
+  const point = curveCanvasCoordinates(event);
+  const plot = state.curveDesignerPlot;
+  if (!pointInsideCurvePlot(point, plot)) {
+    return;
+  }
+  hideCurvePointMenu();
+  const hitRadius = 12 * point.scale;
+  const closestPoint = plot.controlPoints.reduce((closest, controlPoint, pointIndex) => {
+    const distance = Math.hypot(
+      point.x - controlPoint.canvasX,
+      point.y - controlPoint.canvasY,
+    );
+    return !closest || distance < closest.distance
+      ? { point: controlPoint, pointIndex, distance }
+      : closest;
+  }, null);
+  if (closestPoint?.distance <= hitRadius) {
+    state.curveSelectedPointTimeMs = Number(closestPoint.point.time_ms);
+    if (closestPoint.point.locked === true) {
+      redrawCurveDesignerCanvas();
+      return;
+    }
+    const leftPoint = plot.controlPoints[closestPoint.pointIndex - 1];
+    const rightPoint = plot.controlPoints[closestPoint.pointIndex + 1];
+    const endpoint = closestPoint.pointIndex === 0
+      || closestPoint.pointIndex === plot.controlPoints.length - 1;
+    state.curvePointDrag = {
+      pointerId: event.pointerId,
+      pointIndex: closestPoint.pointIndex,
+      timeMs: Number(closestPoint.point.time_ms),
+      originalX: closestPoint.point.canvasX,
+      originalY: closestPoint.point.canvasY,
+      currentX: closestPoint.point.canvasX,
+      currentY: closestPoint.point.canvasY,
+      minimumX: endpoint
+        ? closestPoint.point.canvasX
+        : leftPoint.canvasX + 3,
+      maximumX: endpoint
+        ? closestPoint.point.canvasX
+        : rightPoint.canvasX - 3,
+    };
+    elements.curveDesignerCanvas.setPointerCapture(event.pointerId);
+    redrawCurveDesignerCanvas();
+    return;
+  }
+  state.curveZoomDrag = {
+    pointerId: event.pointerId,
+    startX: point.x,
+    startY: point.y,
+    currentX: point.x,
+    currentY: point.y,
+  };
+  elements.curveDesignerCanvas.setPointerCapture(event.pointerId);
+  redrawCurveDesignerCanvas();
+}
+
+function handleCurveZoomPointerMove(event) {
+  const pointDrag = state.curvePointDrag;
+  if (pointDrag?.pointerId === event.pointerId && state.curveDesignerPlot) {
+    const point = curveCanvasCoordinates(event);
+    const plot = state.curveDesignerPlot;
+    pointDrag.currentX = Math.max(
+      pointDrag.minimumX,
+      Math.min(pointDrag.maximumX, point.x),
+    );
+    pointDrag.currentY = Math.max(
+      plot.paddingTop,
+      Math.min(plot.paddingTop + plot.plotHeight, point.y),
+    );
+    redrawCurveDesignerCanvas();
+    return;
+  }
+  const drag = state.curveZoomDrag;
+  const plot = state.curveDesignerPlot;
+  if (!drag || drag.pointerId !== event.pointerId || !plot) {
+    return;
+  }
+  const point = curveCanvasCoordinates(event);
+  drag.currentX = Math.max(plot.paddingLeft, Math.min(plot.paddingLeft + plot.plotWidth, point.x));
+  drag.currentY = Math.max(plot.paddingTop, Math.min(plot.paddingTop + plot.plotHeight, point.y));
+  redrawCurveDesignerCanvas();
+}
+
+async function handleCurveZoomPointerUp(event) {
+  const pointDrag = state.curvePointDrag;
+  if (pointDrag?.pointerId === event.pointerId && state.curveDesignerPlot) {
+    const plot = state.curveDesignerPlot;
+    state.curvePointDrag = null;
+    state.curveSelectedPointTimeMs = null;
+    if (
+      Math.hypot(
+        pointDrag.currentX - pointDrag.originalX,
+        pointDrag.currentY - pointDrag.originalY,
+      ) < 3
+    ) {
+      redrawCurveDesignerCanvas();
+      return;
+    }
+    const newTimeMs = (
+      plot.view.xMin
+      + (pointDrag.currentX - plot.paddingLeft)
+      / plot.plotWidth * (plot.view.xMax - plot.view.xMin)
+    ) * 1000;
+    const newFlowMlS = plot.view.yMax
+      - (pointDrag.currentY - plot.paddingTop)
+      / plot.plotHeight * (plot.view.yMax - plot.view.yMin);
+    await moveCurveControlPoint(pointDrag.timeMs, newTimeMs, newFlowMlS);
+    return;
+  }
+  const drag = state.curveZoomDrag;
+  const plot = state.curveDesignerPlot;
+  if (!drag || drag.pointerId !== event.pointerId || !plot) {
+    return;
+  }
+  const dx = Math.abs(drag.currentX - drag.startX);
+  const dy = Math.abs(drag.currentY - drag.startY);
+  state.curveZoomDrag = null;
+  if (Math.hypot(dx, dy) < 8) {
+    redrawCurveDesignerCanvas();
+    return;
+  }
+
+  const xAt = (canvasX) => plot.view.xMin
+    + (canvasX - plot.paddingLeft) / plot.plotWidth * (plot.view.xMax - plot.view.xMin);
+  const yAt = (canvasY) => plot.view.yMax
+    - (canvasY - plot.paddingTop) / plot.plotHeight * (plot.view.yMax - plot.view.yMin);
+  const nextView = { ...plot.view };
+  if (dx >= 3 * dy) {
+    nextView.xMin = xAt(Math.min(drag.startX, drag.currentX));
+    nextView.xMax = xAt(Math.max(drag.startX, drag.currentX));
+  } else if (dy >= 3 * dx) {
+    nextView.yMin = yAt(Math.max(drag.startY, drag.currentY));
+    nextView.yMax = yAt(Math.min(drag.startY, drag.currentY));
+  } else {
+    nextView.xMin = xAt(Math.min(drag.startX, drag.currentX));
+    nextView.xMax = xAt(Math.max(drag.startX, drag.currentX));
+    nextView.yMin = yAt(Math.max(drag.startY, drag.currentY));
+    nextView.yMax = yAt(Math.min(drag.startY, drag.currentY));
+  }
+  state.curveDesignerView = nextView;
+  redrawCurveDesignerCanvas();
+}
+
+function cancelCurveZoom() {
+  if (state.curveZoomDrag || state.curvePointDrag) {
+    state.curveZoomDrag = null;
+    state.curvePointDrag = null;
+    redrawCurveDesignerCanvas();
+  }
+}
+
+function resetCurveZoom() {
+  state.curveZoomDrag = null;
+  state.curvePointDrag = null;
+  state.curveDesignerView = null;
+  redrawCurveDesignerCanvas();
 }
 
 function formatFlow(flow) {
@@ -979,13 +1773,19 @@ async function updateControl() {
   }
 }
 
-async function setMode(mode) {
-  setActiveFlowMode(mode);
+async function setMode(mode, flowMode = mode, waveformSource = null) {
+  setActiveFlowMode(flowMode);
   state.busy = true;
   try {
-    const payload = await postJson("/api/control", { mode });
+    const request = { mode };
+    if (waveformSource) {
+      request.waveform_source = waveformSource;
+    }
+    const payload = await postJson("/api/control", request);
     renderTelemetry(payload.telemetry);
-    elements.controlMessage.textContent = mode === "waveform" ? "Waveform mode selected." : "Constant flow mode selected.";
+    elements.controlMessage.textContent = flowMode === "curve_designer"
+      ? "Curve Designer mode selected."
+      : flowMode === "waveform" ? "Waveform mode selected." : "Constant flow mode selected.";
     elements.controlMessage.className = "message ok";
   } catch (error) {
     elements.controlMessage.textContent = error.message;
@@ -1021,6 +1821,142 @@ async function loadWaveform() {
   }
 }
 
+async function initializeCurveDesigner() {
+  setActiveFlowMode("curve_designer");
+  state.busy = true;
+  try {
+    const constantFlow = Number(state.telemetry?.control?.flow_ml_s) || 0;
+    const payload = await postJson("/api/curve-designer", {
+      constant_flow_ml_s: constantFlow,
+    });
+    state.curveDesignerFileName = null;
+    state.curveDesignerView = null;
+    state.curveSelectedPointTimeMs = null;
+    state.curveDesignerRenderKey = null;
+    renderTelemetry(payload.telemetry);
+    elements.controlMessage.textContent = `Curve Designer initialized at ${constantFlow.toFixed(2)} mL/s.`;
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function loadCurveDesignerFile() {
+  const file = elements.curveDesignerFile.files[0];
+  if (!file) {
+    return;
+  }
+
+  setActiveFlowMode("curve_designer");
+  state.busy = true;
+  try {
+    const text = await file.text();
+    const controlPointCount = Number(elements.curveControlPointCount.value);
+    const payload = await postJson("/api/curve-designer", {
+      text,
+      control_point_count: controlPointCount,
+    });
+    state.curveDesignerFileName = file.name;
+    state.curveDesignerView = null;
+    state.curveSelectedPointTimeMs = null;
+    state.curveDesignerRenderKey = null;
+    renderTelemetry(payload.telemetry);
+    const source = payload.telemetry.control?.curve_designer?.source;
+    elements.controlMessage.textContent = source === "checkpoint"
+      ? `${file.name} builder checkpoint restored.`
+      : `${file.name} fitted with ${controlPointCount} control points.`;
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    elements.curveDesignerFile.value = "";
+    state.busy = false;
+  }
+}
+
+async function saveCurveDesigner(format) {
+  state.busy = true;
+  try {
+    const payload = await postJson("/api/curve-designer/export", { format });
+    const checkpoint = format === "checkpoint";
+    const mimeType = checkpoint ? "application/json" : "text/csv";
+    const extension = checkpoint ? "json" : "csv";
+    const descriptor = checkpoint ? "builder-checkpoint" : "curve";
+    const url = URL.createObjectURL(new Blob([payload.text], { type: mimeType }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `cardiopump-${descriptor}-${new Date().toISOString().slice(0, 10)}.${extension}`;
+    link.click();
+    URL.revokeObjectURL(url);
+    elements.controlMessage.textContent = checkpoint
+      ? "Curve Designer checkpoint saved."
+      : "Current curve saved as CSV.";
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+  } finally {
+    state.busy = false;
+  }
+}
+
+function updateCurveDesignerFileHint() {
+  if (!state.curveDesignerFileName) {
+    elements.curveDesignerFileHint.textContent =
+      `The next file will be fitted with ${elements.curveControlPointCount.value} control points.`;
+  }
+}
+
+async function refitCurveDesigner(reset = false) {
+  state.busy = true;
+  try {
+    const controlPointCount = Number(elements.curveControlPointCount.value);
+    const payload = await postJson("/api/curve-designer/refit", reset
+      ? { reset: true }
+      : { control_point_count: controlPointCount });
+    state.curveDesignerView = null;
+    state.curveSelectedPointTimeMs = null;
+    state.curveDesignerRenderKey = null;
+    renderTelemetry(payload.telemetry);
+    const fittedCount = payload.telemetry.control?.waveform?.control_points?.length;
+    elements.controlMessage.textContent = reset
+      ? `Curve reset to its ${fittedCount}-point saved baseline.`
+      : `Curve reset and refitted with ${fittedCount} control points.`;
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function updateCurveDesignerPointCount() {
+  const requestedCount = Math.round(Number(elements.curveControlPointCount.value));
+  const controlPointCount = Math.max(2, Math.min(20, Number.isFinite(requestedCount) ? requestedCount : 6));
+  elements.curveControlPointCount.value = String(controlPointCount);
+  updateCurveDesignerFileHint();
+  if (["file", "checkpoint"].includes(state.telemetry?.control?.curve_designer?.source)) {
+    await refitCurveDesigner();
+  } else {
+    elements.curvePointCountDecrease.disabled = controlPointCount <= 2;
+    elements.curvePointCountIncrease.disabled = controlPointCount >= 20;
+  }
+}
+
+async function stepCurveDesignerPointCount(delta) {
+  const currentCount = Number(elements.curveControlPointCount.value) || 6;
+  elements.curveControlPointCount.value = String(Math.max(2, Math.min(20, currentCount + delta)));
+  await updateCurveDesignerPointCount();
+}
+
 async function updateWaveformSettings() {
   const maxFlow = Number(elements.waveformMaxFlowInput.value);
   const periodMs = Number(elements.waveformPeriodInput.value);
@@ -1032,6 +1968,48 @@ async function updateWaveformSettings() {
     });
     renderTelemetry(payload.telemetry);
     elements.controlMessage.textContent = "Waveform settings applied.";
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function updateCurveDesignerSettings() {
+  const maxFlow = Number(elements.curveMaxFlowInput.value);
+  const periodMs = Number(elements.curvePeriodInput.value);
+  state.busy = true;
+  try {
+    const payload = await postJson("/api/control", {
+      waveform_max_flow_ml_s: maxFlow,
+      waveform_period_ms: periodMs,
+    });
+    state.curveDesignerView = null;
+    state.curveDesignerRenderKey = null;
+    renderTelemetry(payload.telemetry);
+    elements.controlMessage.textContent = "Curve maximum flow and period applied.";
+    elements.controlMessage.className = "message ok";
+  } catch (error) {
+    elements.controlMessage.textContent = error.message;
+    elements.controlMessage.className = "message error";
+    await refreshTelemetry();
+  } finally {
+    state.busy = false;
+  }
+}
+
+async function updateCurveInterpolation() {
+  state.busy = true;
+  try {
+    const payload = await postJson("/api/curve-designer/interpolation", {
+      interpolation: elements.curveInterpolationSelect.value,
+    });
+    state.curveDesignerRenderKey = null;
+    renderTelemetry(payload.telemetry);
+    elements.controlMessage.textContent = "Curve interpolation updated.";
     elements.controlMessage.className = "message ok";
   } catch (error) {
     elements.controlMessage.textContent = error.message;
@@ -1266,7 +2244,9 @@ async function clearCalibration() {
     state.calibrationFileName = null;
     state.calibrationRenderKey = null;
     renderTelemetry(payload.telemetry);
-    elements.controlMessage.textContent = "Arduino calibration cleared.";
+    elements.controlMessage.textContent = payload.telemetry.hardware?.connected
+      ? "Arduino calibration cleared."
+      : "Local calibration cleared.";
     elements.controlMessage.className = "message ok";
   } catch (error) {
     elements.controlMessage.textContent = error.message;
@@ -1358,16 +2338,74 @@ elements.flowInput.addEventListener("change", updateControl);
 elements.flowTabButtons.forEach((button) => {
   button.addEventListener("click", () => {
     const mode = button.dataset.flowMode;
-    if (mode === "waveform" && state.telemetry?.control?.waveform_available !== true) {
-      setActiveFlowMode(mode);
-      elements.controlMessage.textContent = "Select a waveform file.";
-      elements.controlMessage.className = "message";
+    const control = state.telemetry?.control || {};
+    if (mode === "waveform") {
+      if (control.pulsatile_waveform_available) {
+        setMode("waveform", mode, "pulsatile");
+      } else {
+        setActiveFlowMode(mode);
+        elements.controlMessage.textContent = "Select a waveform file.";
+        elements.controlMessage.className = "message";
+      }
+      return;
+    }
+    if (mode === "curve_designer") {
+      if (control.curve_designer_waveform_available) {
+        setMode("waveform", mode, "curve_designer");
+      } else {
+        initializeCurveDesigner();
+      }
       return;
     }
     setMode(mode);
   });
 });
 elements.waveformFile.addEventListener("change", loadWaveform);
+elements.curveDesignerFile.addEventListener("change", loadCurveDesignerFile);
+elements.curveControlPointCount.addEventListener("change", updateCurveDesignerPointCount);
+elements.curvePointCountDecrease.addEventListener("click", () => stepCurveDesignerPointCount(-1));
+elements.curvePointCountIncrease.addEventListener("click", () => stepCurveDesignerPointCount(1));
+elements.curveResetButton.addEventListener("click", () => refitCurveDesigner(true));
+elements.curveUseConstantButton.addEventListener("click", initializeCurveDesigner);
+elements.saveCurveCsvButton.addEventListener("click", () => saveCurveDesigner("csv"));
+elements.saveCurveCheckpointButton.addEventListener("click", () => saveCurveDesigner("checkpoint"));
+elements.curveDesignerCanvas.addEventListener("contextmenu", handleCurveDesignerContextMenu);
+elements.curveDesignerCanvas.addEventListener("pointerdown", handleCurveZoomPointerDown);
+elements.curveDesignerCanvas.addEventListener("pointermove", handleCurveZoomPointerMove);
+elements.curveDesignerCanvas.addEventListener("pointerup", handleCurveZoomPointerUp);
+elements.curveDesignerCanvas.addEventListener("pointercancel", cancelCurveZoom);
+elements.curveDesignerCanvas.addEventListener("dblclick", resetCurveZoom);
+elements.curvePointAddButton.addEventListener("click", () => {
+  const target = state.curvePointMenuTarget;
+  if (target?.type === "add") {
+    editCurveControlPoint("add", target.timeMs);
+  }
+});
+elements.curvePointLockButton.addEventListener("click", () => {
+  const point = state.curvePointMenuTarget?.point;
+  if (state.curvePointMenuTarget?.type === "point" && point) {
+    editCurveControlPoint("toggle_lock", point.time_ms, point.locked === true);
+  }
+});
+elements.curvePointRemoveButton.addEventListener("click", () => {
+  const point = state.curvePointMenuTarget?.point;
+  if (state.curvePointMenuTarget?.type === "point" && point) {
+    editCurveControlPoint("remove", point.time_ms);
+  }
+});
+document.addEventListener("click", (event) => {
+  if (!elements.curvePointMenu.contains(event.target)) {
+    hideCurvePointMenu();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    hideCurvePointMenu();
+  }
+});
+elements.curveMaxFlowInput.addEventListener("change", updateCurveDesignerSettings);
+elements.curvePeriodInput.addEventListener("change", updateCurveDesignerSettings);
+elements.curveInterpolationSelect.addEventListener("change", updateCurveInterpolation);
 elements.waveformMaxFlowInput.addEventListener("change", updateWaveformSettings);
 elements.waveformPeriodInput.addEventListener("change", updateWaveformSettings);
 elements.clipNegativeFlowInput.addEventListener("change", updateNegativeFlowClipping);
@@ -1409,6 +2447,7 @@ wireTabKeyboard(elements.flowTabButtons);
 
 setActiveTab("flow");
 setActiveFlowMode("constant");
+state.flowModeInitialized = false;
 refreshTelemetry();
 setInterval(refreshTelemetry, 100);
 if (!window.cardiopump?.mainOwnsHeartbeat) {

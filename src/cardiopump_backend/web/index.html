@@ -20,7 +20,7 @@
       <div id="control-message" class="activity-bar" role="status" aria-live="polite">
         <span class="activity-indicator" aria-hidden="true"></span>
         <span class="activity-label">Activity</span>
-        <span class="activity-copy">Set constant flow or load a pulsatile waveform.</span>
+        <span class="activity-copy">Set constant flow, load a pulsatile waveform, or design a control-point curve.</span>
       </div>
       <div class="topbar-actions">
         <div class="system-summary" aria-live="polite">
@@ -75,6 +75,7 @@
             <nav class="flow-tabs" role="tablist" aria-label="Flow mode">
               <button id="constant-mode-button" class="flow-tab-button active" role="tab" type="button" data-flow-mode="constant" aria-controls="constant-flow-panel" aria-selected="true">Constant</button>
               <button id="waveform-mode-button" class="flow-tab-button" role="tab" type="button" data-flow-mode="waveform" aria-controls="pulsatile-flow-panel" aria-selected="false">Pulsatile</button>
+              <button id="curve-designer-mode-button" class="flow-tab-button" role="tab" type="button" data-flow-mode="curve_designer" aria-controls="curve-designer-flow-panel" aria-selected="false">Curve Designer</button>
             </nav>
           </header>
 
@@ -187,6 +188,102 @@
                     <span class="switch" aria-hidden="true"></span>
                   </label>
                   <button id="reset-waveform-defaults-button" class="secondary-button" type="button">Reset waveform defaults</button>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section id="curve-designer-flow-panel" class="flow-panel" role="tabpanel" aria-labelledby="curve-designer-mode-button" hidden>
+            <div class="waveform-workspace">
+              <section class="panel waveform-visual-panel">
+                <div class="panel-title waveform-title">
+                  <div>
+                    <p class="eyebrow">Periodic Curve Designer</p>
+                  </div>
+                  <span id="curve-designer-state" class="mini-status">Two-point constant</span>
+                </div>
+                <div class="waveform-metrics curve-metrics" aria-label="Curve designer summary">
+                  <div><span>Control points</span><strong id="curve-control-points-value">—</strong></div>
+                  <div><span>Stroke volume</span><strong id="curve-stroke-volume-value">—</strong></div>
+                </div>
+                <div class="chart-frame">
+                  <canvas id="curve-designer-canvas" width="960" height="540" aria-label="Fitted control-point flow curve preview"></canvas>
+                  <div class="chart-legend curve-chart-legend" aria-hidden="true">
+                    <div id="curve-original-legend" class="curve-original-legend" hidden>
+                      <span class="original-curve-key"></span><b id="curve-reference-label">Original curve</b>
+                    </div>
+                    <span class="curve-line-key"></span> Fitted curve
+                    <span class="control-point-key"></span> Control points
+                  </div>
+                  <div id="curve-point-menu" class="curve-point-menu" role="menu" hidden>
+                    <button id="curve-point-add-button" type="button" role="menuitem">Add point</button>
+                    <button id="curve-point-lock-button" type="button" role="menuitem">Lock point</button>
+                    <button id="curve-point-remove-button" type="button" role="menuitem">Remove point</button>
+                  </div>
+                </div>
+                <div class="chart-footer">
+                  <p id="curve-designer-status" class="message">Select Curve Designer to initialize a flat two-point curve.</p>
+                  <span class="clip-status">Drag points or plot to edit · <span id="curve-interpolation-label">PCHIP</span></span>
+                </div>
+              </section>
+
+              <section class="panel waveform-controls">
+                <div class="panel-title">
+                  <div>
+                    <p class="eyebrow">Initialization</p>
+                    <h3>Curve setup</h3>
+                  </div>
+                </div>
+                <div class="waveform-loader">
+                  <div class="curve-point-count-control">
+                    <label for="curve-control-point-count">Control points for next file</label>
+                    <span class="curve-point-count-stepper">
+                      <button id="curve-point-count-decrease" type="button" aria-label="Decrease control point count">−</button>
+                      <input id="curve-control-point-count" type="number" min="2" max="20" step="1" value="6">
+                      <button id="curve-point-count-increase" type="button" aria-label="Increase control point count">+</button>
+                    </span>
+                  </div>
+                  <p class="field-note">Choose 2–20 points before loading. The backend places points adaptively, then uses shape-preserving cubic interpolation.</p>
+                  <label class="file-drop-control">
+                    <span>Source curve</span>
+                    <strong id="curve-designer-file-title">Choose a curve CSV or builder checkpoint</strong>
+                    <small id="curve-designer-file-hint">The next file will be fitted with 6 control points.</small>
+                    <input id="curve-designer-file" type="file" accept=".txt,.csv,.json,text/plain,text/csv,application/json">
+                  </label>
+                  <div class="waveform-settings">
+                    <label>
+                      Maximum flow
+                      <span class="input-with-unit compact">
+                        <input id="curve-max-flow-input" type="number" min="0" step="0.01">
+                        <span>mL/s</span>
+                      </span>
+                    </label>
+                    <label>
+                      Period
+                      <span class="input-with-unit compact">
+                        <input id="curve-period-input" type="number" min="1" step="1">
+                        <span>ms</span>
+                      </span>
+                    </label>
+                    <label class="curve-interpolation-control">
+                      Interpolation
+                      <select id="curve-interpolation-select">
+                        <option value="pchip">Shape-preserving cubic (PCHIP)</option>
+                        <option value="linear">Linear</option>
+                        <option value="cubic">Periodic cubic (smoothest)</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p id="curve-interpolation-note" class="field-note">PCHIP avoids overshoot and matches the slope at the cycle boundary.</p>
+                  <div class="button-row">
+                    <button id="curve-reset-button" class="secondary-button" type="button" disabled>Reset curve</button>
+                    <button id="curve-use-constant-button" class="secondary-button" type="button">Use current constant flow</button>
+                  </div>
+                  <div class="button-row">
+                    <button id="save-curve-csv-button" class="secondary-button" type="button" disabled>Save curve CSV</button>
+                    <button id="save-curve-checkpoint-button" class="secondary-button" type="button" disabled>Save builder checkpoint</button>
+                  </div>
+                  <p class="field-note">Constant initialization uses the current Constant-mode setpoint over a 1 second period and always creates two points.</p>
                 </div>
               </section>
             </div>

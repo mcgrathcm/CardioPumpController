@@ -1,6 +1,7 @@
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from cardiopump_backend.arduino import (
@@ -9,6 +10,7 @@ from cardiopump_backend.arduino import (
     ArduinoState,
 )
 from cardiopump_backend.server import CardiopumpRequestHandler
+from cardiopump_backend.waveform import program_from_text
 
 
 class ArduinoTelemetryTests(unittest.TestCase):
@@ -206,6 +208,59 @@ class StartReadinessTests(unittest.TestCase):
             1.4,
         )
         self.assertEqual(self.handler._max_flow_ml_s({}), 1.0)
+
+    def test_loaded_calibration_is_available_without_serial_bridge(self):
+        self.handler.arduino = None
+        self.handler.server = SimpleNamespace(
+            loaded_calibration_flows_ml_s=(0.2, 0.5, 0.9, 1.4),
+            calibration_pending_transfer=True,
+        )
+
+        hardware = self.handler._hardware_telemetry()
+
+        self.assertFalse(hardware["connected"])
+        self.assertTrue(hardware["calibration_valid"])
+        self.assertTrue(hardware["calibration_pending_transfer"])
+        self.assertEqual(hardware["calibration_flows_ml_s"], [0.2, 0.5, 0.9, 1.4])
+        self.assertEqual(self.handler._max_flow_ml_s(hardware), 1.4)
+
+    def test_pending_loaded_calibration_syncs_when_hardware_is_ready(self):
+        bridge = Mock()
+        bridge.telemetry.return_value = self.ready
+        self.handler.arduino = bridge
+        self.handler.server = SimpleNamespace(
+            loaded_calibration_flows_ml_s=(0.2, 0.5, 0.9, 1.4),
+            calibration_pending_transfer=True,
+        )
+
+        hardware = self.handler._sync_loaded_calibration(self.ready)
+
+        bridge.load_calibration.assert_called_once_with((0.2, 0.5, 0.9, 1.4))
+        bridge.request_telemetry.assert_called_once_with()
+        self.assertFalse(self.handler.server.calibration_pending_transfer)
+        self.assertTrue(hardware["calibration_valid"])
+        self.assertFalse(hardware["calibration_pending_transfer"])
+
+    def test_pulsatile_and_curve_designer_programs_switch_independently(self):
+        pulsatile = program_from_text("0 0\n1000 1\n")
+        curve_designer = program_from_text("0 0\n500 0.5\n1000 0\n")
+        self.handler.server = SimpleNamespace(
+            waveform_program=curve_designer,
+            waveform_source="curve_designer",
+            pulsatile_waveform_program=pulsatile,
+            curve_designer_waveform_program=curve_designer,
+        )
+
+        self.handler._activate_waveform_source("pulsatile")
+        self.assertIs(self.handler.server.waveform_program, pulsatile)
+        self.handler._activate_waveform_source("curve_designer")
+        self.assertIs(self.handler.server.waveform_program, curve_designer)
+
+        edited_curve = curve_designer.with_settings(0.75, 1000.0)
+        self.handler.server.waveform_program = edited_curve
+        self.handler._cache_active_waveform()
+        self.assertIs(self.handler.server.curve_designer_waveform_program, edited_curve)
+        self.assertIs(self.handler.server.pulsatile_waveform_program, pulsatile)
 
 if __name__ == "__main__":
     unittest.main()

@@ -3,7 +3,7 @@
 Each CSV can be loaded directly by the Cardiopump GUI.
 Comment lines retain all source PMP metadata; the loader ignores lines beginning with `#`.
 Numeric rows contain `time_ms,flow_normalized` values.
-The PMP normalized flow samples are preserved; use Maximum flow in the GUI to set physical scaling.
+The PMP normalized flow samples are preserved; their `# Scale` metadata initializes Maximum flow in the GUI.
 The final row closes the cycle at the full PMP RR period using the first flow sample.
 At 250 Hz the GUI rounds periods to its 4 ms raster (by at most 2 ms here); at 500 Hz these 10 ms-based periods are exact.
 

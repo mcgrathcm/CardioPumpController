@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import json
 from bisect import bisect_right
 from dataclasses import dataclass
-from math import floor, isclose, isfinite
+from math import copysign, floor, isclose, isfinite, sqrt
 
 from .constants import MAX_WAVEFORM_SAMPLES, WAVEFORM_UPDATE_HZ
+
+CONTROL_POINT_INTERPOLATIONS = ("pchip", "linear", "cubic")
+CURVE_DESIGNER_CHECKPOINT_FORMAT = "cardiopump-curve-designer"
 
 
 @dataclass(frozen=True)
@@ -21,6 +25,8 @@ class WaveformProgram:
     flow_scale: float = 1.0
     period_scale: float = 1.0
     clip_negative_flow: bool = False
+    interpolation: str = "linear"
+    control_point_curve: bool = False
 
     @property
     def raster_period_ms(self) -> float:
@@ -137,6 +143,8 @@ class WaveformProgram:
             flow_scale=flow_scale,
             period_scale=period_scale,
             clip_negative_flow=self.clip_negative_flow,
+            interpolation=self.interpolation,
+            control_point_curve=self.control_point_curve,
         )
         program.sample_count
         if not _is_raster_multiple(program.period_ms, program.update_hz):
@@ -156,6 +164,8 @@ class WaveformProgram:
             flow_scale=self.flow_scale,
             period_scale=period_ms / self.source_duration_ms,
             clip_negative_flow=self.clip_negative_flow,
+            interpolation=self.interpolation,
+            control_point_curve=self.control_point_curve,
         )
         program.sample_count
         return program
@@ -168,6 +178,23 @@ class WaveformProgram:
             flow_scale=self.flow_scale,
             period_scale=self.period_scale,
             clip_negative_flow=enabled,
+            interpolation=self.interpolation,
+            control_point_curve=self.control_point_curve,
+        )
+
+    def with_interpolation(self, interpolation: str) -> WaveformProgram:
+        if not self.control_point_curve:
+            raise ValueError("interpolation can only be changed for a control-point curve")
+        _validate_control_point_interpolation(interpolation)
+        return WaveformProgram(
+            points=self.points,
+            update_hz=self.update_hz,
+            max_samples=self.max_samples,
+            flow_scale=self.flow_scale,
+            period_scale=self.period_scale,
+            clip_negative_flow=self.clip_negative_flow,
+            interpolation=interpolation,
+            control_point_curve=True,
         )
 
     def reset_scaling(self) -> WaveformProgram:
@@ -218,15 +245,19 @@ class WaveformProgram:
             "negative_clipped_sample_count": self.negative_clipped_sample_count,
             "total_stroke_volume_ml": _stroke_volume_ml(scaled_flows, self.update_hz),
             "calibration": "firmware_managed",
+            "interpolation": self.interpolation,
+            "control_points": self._control_points_json(max_flow_limit_ml_s),
             "preview": preview,
         }
 
     def _resampled_flows(self) -> tuple[float, ...]:
         count = self.sample_count
+        slopes = _control_point_slopes(self.points, self.interpolation)
         return tuple(
             _interpolate(
                 self.points,
                 (index * 1000.0 / self.update_hz) / self.period_scale,
+                slopes,
             )
             * self.flow_scale
             for index in range(count)
@@ -251,6 +282,32 @@ class WaveformProgram:
         max_flow = self.max_flow_ml_s
         drive_fraction = 0.0 if max_flow == 0.0 else flow_ml_s / max_flow
         return max(-1.0, min(1.0, drive_fraction)) if clip else drive_fraction
+
+    def _control_points_json(
+        self, max_flow_limit_ml_s: float | None
+    ) -> list[dict[str, float | bool]]:
+        if not self.control_point_curve:
+            return []
+        points = []
+        for point in self.points:
+            requested_flow = point.flow_ml_s * self.flow_scale
+            commanded_flow = (
+                max(0.0, requested_flow) if self.clip_negative_flow else requested_flow
+            )
+            flow = commanded_flow
+            if max_flow_limit_ml_s is not None:
+                flow = max(-max_flow_limit_ml_s, min(max_flow_limit_ml_s, flow))
+            time_ms = point.time_ms * self.period_scale
+            points.append(
+                {
+                    "time_ms": time_ms,
+                    "time_s": time_ms / 1000.0,
+                    "flow_ml_s": flow,
+                    "flow": flow,
+                    "clipped": flow != requested_flow,
+                }
+            )
+        return points
 
     def _preview_points(
         self,
@@ -296,10 +353,392 @@ def program_from_text(
         points=points,
         update_hz=update_hz,
         max_samples=max_samples,
+        flow_scale=_flow_scale_from_metadata(text),
         period_scale=default_period_ms / source_duration_ms,
     )
     program.sample_count
     return program
+
+
+@dataclass(frozen=True)
+class ControlPointFit:
+    program: WaveformProgram
+    source_point_count: int
+    max_error_ml_s: float
+    rmse_ml_s: float
+
+
+def control_point_program_from_text(
+    text: str,
+    control_point_count: int,
+    *,
+    update_hz: int = WAVEFORM_UPDATE_HZ,
+    max_samples: int = MAX_WAVEFORM_SAMPLES,
+) -> ControlPointFit:
+    source_program = program_from_text(
+        text,
+        update_hz=update_hz,
+        max_samples=max_samples,
+    )
+    fit = control_point_program_from_points(
+        source_program.points,
+        control_point_count,
+        update_hz=update_hz,
+        max_samples=max_samples,
+    )
+    return ControlPointFit(
+        program=fit.program.with_scaling(
+            source_program.flow_scale,
+            source_program.period_scale,
+        ),
+        source_point_count=fit.source_point_count,
+        max_error_ml_s=fit.max_error_ml_s * source_program.flow_scale,
+        rmse_ml_s=fit.rmse_ml_s * source_program.flow_scale,
+    )
+
+
+def control_point_program_from_points(
+    source_points: tuple[WaveformPoint, ...],
+    control_point_count: int,
+    *,
+    update_hz: int = WAVEFORM_UPDATE_HZ,
+    max_samples: int = MAX_WAVEFORM_SAMPLES,
+) -> ControlPointFit:
+    _validate_control_point_count(control_point_count)
+    if control_point_count > len(source_points):
+        raise ValueError(
+            f"curve file contains {len(source_points)} points; "
+            f"choose {len(source_points)} or fewer control points"
+        )
+
+    selected = {0, len(source_points) - 1}
+    while len(selected) < control_point_count:
+        control_points = _periodic_control_points(
+            tuple(source_points[index] for index in sorted(selected))
+        )
+        slopes = _pchip_slopes(control_points)
+        candidate = max(
+            (index for index in range(1, len(source_points) - 1) if index not in selected),
+            key=lambda index: (
+                abs(
+                    source_points[index].flow_ml_s
+                    - _interpolate(control_points, source_points[index].time_ms, slopes)
+                ),
+                -index,
+            ),
+        )
+        selected.add(candidate)
+
+    control_points = _periodic_control_points(
+        tuple(source_points[index] for index in sorted(selected))
+    )
+    return control_point_fit_from_points(
+        source_points,
+        control_points,
+        update_hz=update_hz,
+        max_samples=max_samples,
+    )
+
+
+def control_point_fit_from_points(
+    source_points: tuple[WaveformPoint, ...],
+    control_points: tuple[WaveformPoint, ...],
+    *,
+    interpolation: str = "pchip",
+    update_hz: int = WAVEFORM_UPDATE_HZ,
+    max_samples: int = MAX_WAVEFORM_SAMPLES,
+) -> ControlPointFit:
+    program = program_from_control_points(
+        control_points,
+        interpolation=interpolation,
+        update_hz=update_hz,
+        max_samples=max_samples,
+    )
+    control_points = program.points
+    slopes = _control_point_slopes(control_points, interpolation)
+    errors = tuple(
+        point.flow_ml_s - _interpolate(control_points, point.time_ms, slopes)
+        for point in source_points
+    )
+    return ControlPointFit(
+        program=program,
+        source_point_count=len(source_points),
+        max_error_ml_s=max(abs(error) for error in errors),
+        rmse_ml_s=sqrt(sum(error * error for error in errors) / len(errors)),
+    )
+
+
+def curve_designer_csv_text(program: WaveformProgram) -> str:
+    if not program.control_point_curve:
+        raise ValueError("only a Curve Designer program can be exported")
+    flows = program._commanded_flows()
+    lines = [
+        "# Cardiopump Curve Designer export",
+        f"# Interpolation = {program.interpolation}",
+        "# Columns: time_ms,flow_ml_s",
+    ]
+    lines.extend(
+        f"{index * program.raster_period_ms:.12g},{flow:.12g}"
+        for index, flow in enumerate(flows)
+    )
+    lines.append(f"{program.period_ms:.12g},{flows[0]:.12g}")
+    return "\n".join(lines) + "\n"
+
+
+def curve_designer_checkpoint_text(
+    program: WaveformProgram,
+    locked_times_ms: tuple[float, ...] = (),
+) -> str:
+    if not program.control_point_curve:
+        raise ValueError("only a Curve Designer program can be checkpointed")
+    locked_times = set(locked_times_ms)
+    control_points = [
+        {
+            "time_ms": point.time_ms * program.period_scale,
+            "flow_ml_s": point.flow_ml_s * program.flow_scale,
+            "locked": point.time_ms in locked_times,
+        }
+        for point in program.points
+    ]
+    checkpoint = {
+        "format": CURVE_DESIGNER_CHECKPOINT_FORMAT,
+        "version": 1,
+        "interpolation": program.interpolation,
+        "period_ms": program.period_ms,
+        "maximum_flow_ml_s": program.max_flow_ml_s,
+        "control_points": control_points,
+    }
+    return json.dumps(checkpoint, indent=2) + "\n"
+
+
+def curve_designer_checkpoint_from_text(
+    text: str,
+    *,
+    update_hz: int = WAVEFORM_UPDATE_HZ,
+    max_samples: int = MAX_WAVEFORM_SAMPLES,
+) -> tuple[WaveformProgram, tuple[float, ...]] | None:
+    if not text.lstrip().startswith("{"):
+        return None
+    try:
+        checkpoint = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError("Curve Designer checkpoint is not valid JSON") from exc
+    if not isinstance(checkpoint, dict) or checkpoint.get("format") != CURVE_DESIGNER_CHECKPOINT_FORMAT:
+        raise ValueError("JSON file is not a Curve Designer checkpoint")
+    if checkpoint.get("version") != 1:
+        raise ValueError("unsupported Curve Designer checkpoint version")
+    interpolation = checkpoint.get("interpolation")
+    if not isinstance(interpolation, str):
+        raise ValueError("Curve Designer checkpoint interpolation is required")
+    raw_points = checkpoint.get("control_points")
+    if not isinstance(raw_points, list):
+        raise ValueError("Curve Designer checkpoint control points are required")
+    points: list[WaveformPoint] = []
+    locked_indices: list[int] = []
+    for index, raw_point in enumerate(raw_points):
+        if not isinstance(raw_point, dict):
+            raise ValueError("Curve Designer checkpoint control points must be objects")
+        try:
+            time_ms = float(raw_point["time_ms"])
+            flow_ml_s = float(raw_point["flow_ml_s"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                "Curve Designer checkpoint points require numeric time_ms and flow_ml_s"
+            ) from exc
+        points.append(WaveformPoint(time_ms, flow_ml_s))
+        if raw_point.get("locked") is True:
+            locked_indices.append(index)
+    program = program_from_control_points(
+        tuple(points),
+        interpolation=interpolation,
+        update_hz=update_hz,
+        max_samples=max_samples,
+    )
+    locked_times_ms = tuple(program.points[index].time_ms for index in locked_indices)
+    return program, locked_times_ms
+
+
+def program_from_control_points(
+    points: tuple[WaveformPoint, ...],
+    *,
+    interpolation: str = "pchip",
+    update_hz: int = WAVEFORM_UPDATE_HZ,
+    max_samples: int = MAX_WAVEFORM_SAMPLES,
+) -> WaveformProgram:
+    _validate_control_point_count(len(points))
+    _validate_control_point_interpolation(interpolation)
+    if (
+        points[0].time_ms != 0.0
+        or not all(
+            isfinite(point.time_ms) and isfinite(point.flow_ml_s)
+            for point in points
+        )
+        or any(
+            right.time_ms <= left.time_ms
+            for left, right in zip(points, points[1:])
+        )
+    ):
+        raise ValueError("control points must be finite, start at 0 ms, and increase in time")
+    return _control_point_program(
+        _periodic_control_points(points),
+        update_hz,
+        max_samples,
+        interpolation,
+    )
+
+
+def insert_control_point(program: WaveformProgram, time_ms: float) -> WaveformProgram:
+    if not program.control_point_curve:
+        raise ValueError("control points can only be added to a control-point curve")
+    if len(program.points) >= 20:
+        raise ValueError("curve already has the maximum of 20 control points")
+    if not isfinite(time_ms) or not 0.0 < time_ms < program.period_ms:
+        raise ValueError("new control point must be inside the curve period")
+
+    source_time_ms = time_ms / program.period_scale
+    tolerance_ms = max(1e-9, program.source_duration_ms * 1e-9)
+    if any(
+        isclose(point.time_ms, source_time_ms, abs_tol=tolerance_ms)
+        for point in program.points
+    ):
+        raise ValueError("a control point already exists at that time")
+    flow_ml_s = _interpolate(
+        program.points,
+        source_time_ms,
+        _control_point_slopes(program.points, program.interpolation),
+    ) * program.flow_scale
+    points = tuple(sorted(
+        (
+            *(WaveformPoint(
+                point.time_ms * program.period_scale,
+                point.flow_ml_s * program.flow_scale,
+            ) for point in program.points),
+            WaveformPoint(time_ms, flow_ml_s),
+        ),
+        key=lambda point: point.time_ms,
+    ))
+    updated = program_from_control_points(
+        points,
+        interpolation=program.interpolation,
+        update_hz=program.update_hz,
+        max_samples=program.max_samples,
+    )
+    return updated.with_clip_negative_flow(program.clip_negative_flow)
+
+
+def remove_control_point(program: WaveformProgram, index: int) -> WaveformProgram:
+    if not program.control_point_curve:
+        raise ValueError("control points can only be removed from a control-point curve")
+    if index <= 0 or index >= len(program.points) - 1:
+        raise ValueError("the first and last control points define the curve period")
+    points = tuple(
+        WaveformPoint(
+            point.time_ms * program.period_scale,
+            point.flow_ml_s * program.flow_scale,
+        )
+        for point_index, point in enumerate(program.points)
+        if point_index != index
+    )
+    updated = program_from_control_points(
+        points,
+        interpolation=program.interpolation,
+        update_hz=program.update_hz,
+        max_samples=program.max_samples,
+    )
+    return updated.with_clip_negative_flow(program.clip_negative_flow)
+
+
+def move_control_point(
+    program: WaveformProgram,
+    index: int,
+    time_ms: float,
+    flow_ml_s: float,
+) -> WaveformProgram:
+    if not program.control_point_curve:
+        raise ValueError("control points can only be moved on a control-point curve")
+    if not 0 <= index < len(program.points):
+        raise ValueError("control point index is out of range")
+    if not isfinite(time_ms) or not isfinite(flow_ml_s):
+        raise ValueError("control point time and flow must be finite")
+
+    displayed_points = tuple(
+        WaveformPoint(
+            point.time_ms * program.period_scale,
+            point.flow_ml_s * program.flow_scale,
+        )
+        for point in program.points
+    )
+    if index in (0, len(displayed_points) - 1):
+        time_ms = displayed_points[index].time_ms
+        points = (
+            WaveformPoint(displayed_points[0].time_ms, flow_ml_s),
+            *displayed_points[1:-1],
+            WaveformPoint(displayed_points[-1].time_ms, flow_ml_s),
+        )
+    elif not displayed_points[index - 1].time_ms < time_ms < displayed_points[index + 1].time_ms:
+        raise ValueError("a moved control point cannot cross its neighbors")
+    else:
+        points = (
+            displayed_points[:index]
+            + (WaveformPoint(time_ms, flow_ml_s),)
+            + displayed_points[index + 1 :]
+        )
+    updated = program_from_control_points(
+        points,
+        interpolation=program.interpolation,
+        update_hz=program.update_hz,
+        max_samples=program.max_samples,
+    )
+    return updated.with_clip_negative_flow(program.clip_negative_flow)
+
+
+def constant_control_point_program(
+    flow_ml_s: float,
+    *,
+    period_ms: float = 1000.0,
+    update_hz: int = WAVEFORM_UPDATE_HZ,
+    max_samples: int = MAX_WAVEFORM_SAMPLES,
+) -> WaveformProgram:
+    if not isfinite(flow_ml_s) or flow_ml_s < 0.0:
+        raise ValueError("constant curve flow must be non-negative")
+    if not isfinite(period_ms) or period_ms <= 0.0:
+        raise ValueError("constant curve period must be positive")
+    points = (
+        WaveformPoint(time_ms=0.0, flow_ml_s=flow_ml_s),
+        WaveformPoint(time_ms=period_ms, flow_ml_s=flow_ml_s),
+    )
+    return _control_point_program(points, update_hz, max_samples)
+
+
+def _control_point_program(
+    points: tuple[WaveformPoint, ...],
+    update_hz: int,
+    max_samples: int,
+    interpolation: str = "pchip",
+) -> WaveformProgram:
+    _validate_update_hz(update_hz)
+    if max_samples <= 0:
+        raise ValueError("max_samples must be positive")
+    source_duration_ms = points[-1].time_ms
+    default_period_ms = round_to_raster_ms(source_duration_ms, update_hz)
+    program = WaveformProgram(
+        points=points,
+        update_hz=update_hz,
+        max_samples=max_samples,
+        period_scale=default_period_ms / source_duration_ms,
+        interpolation=interpolation,
+        control_point_curve=True,
+    )
+    program.sample_count
+    return program
+
+
+def _periodic_control_points(
+    points: tuple[WaveformPoint, ...],
+) -> tuple[WaveformPoint, ...]:
+    return points[:-1] + (
+        WaveformPoint(points[-1].time_ms, points[0].flow_ml_s),
+    )
 
 
 def _parse_points(text: str) -> list[WaveformPoint]:
@@ -335,6 +774,30 @@ def _parse_points(text: str) -> list[WaveformPoint]:
     return points
 
 
+def _flow_scale_from_metadata(text: str) -> float:
+    normalized_flow = False
+    scale_text = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("#"):
+            continue
+        metadata = line[1:].strip()
+        if metadata.casefold().startswith("columns:"):
+            normalized_flow = "flow_normalized" in metadata.casefold()
+        key, separator, value = metadata.partition("=")
+        if separator and key.strip().casefold() == "scale":
+            scale_text = value.rstrip(";").strip()
+    if not normalized_flow or scale_text is None:
+        return 1.0
+    try:
+        scale = float(scale_text)
+    except ValueError as exc:
+        raise ValueError("normalized waveform Scale metadata must be numeric") from exc
+    if not isfinite(scale) or scale <= 0.0:
+        raise ValueError("normalized waveform Scale metadata must be positive")
+    return scale
+
+
 def _sample_count(period_ms: float, update_hz: int, max_samples: int) -> int:
     count = round(period_ms / 1000.0 * update_hz)
     if count < 1:
@@ -346,7 +809,11 @@ def _sample_count(period_ms: float, update_hz: int, max_samples: int) -> int:
     return count
 
 
-def _interpolate(points: tuple[WaveformPoint, ...], time_ms: float) -> float:
+def _interpolate(
+    points: tuple[WaveformPoint, ...],
+    time_ms: float,
+    slopes: tuple[float, ...] | None = None,
+) -> float:
     times = [point.time_ms for point in points]
     source_index = bisect_right(times, time_ms) - 1
     if source_index >= len(points) - 1:
@@ -356,7 +823,141 @@ def _interpolate(points: tuple[WaveformPoint, ...], time_ms: float) -> float:
     left = points[source_index]
     right = points[source_index + 1]
     fraction = (time_ms - left.time_ms) / (right.time_ms - left.time_ms)
+    if slopes is not None:
+        span = right.time_ms - left.time_ms
+        fraction_squared = fraction * fraction
+        fraction_cubed = fraction_squared * fraction
+        return (
+            (2 * fraction_cubed - 3 * fraction_squared + 1) * left.flow_ml_s
+            + (fraction_cubed - 2 * fraction_squared + fraction) * span * slopes[source_index]
+            + (-2 * fraction_cubed + 3 * fraction_squared) * right.flow_ml_s
+            + (fraction_cubed - fraction_squared) * span * slopes[source_index + 1]
+        )
     return left.flow_ml_s + fraction * (right.flow_ml_s - left.flow_ml_s)
+
+
+def _control_point_slopes(
+    points: tuple[WaveformPoint, ...], interpolation: str
+) -> tuple[float, ...] | None:
+    if interpolation == "linear":
+        return None
+    if interpolation == "pchip":
+        return _pchip_slopes(points)
+    if interpolation == "cubic":
+        return _periodic_cubic_slopes(points)
+    raise ValueError(f"unsupported interpolation strategy: {interpolation}")
+
+
+def _periodic_cubic_slopes(points: tuple[WaveformPoint, ...]) -> tuple[float, ...]:
+    spans = tuple(
+        right.time_ms - left.time_ms for left, right in zip(points, points[1:])
+    )
+    secants = tuple(
+        (right.flow_ml_s - left.flow_ml_s) / span
+        for left, right, span in zip(points, points[1:], spans)
+    )
+    unique_count = len(points) - 1
+    if unique_count == 1:
+        return (0.0, 0.0)
+
+    matrix = [[0.0] * unique_count for _ in range(unique_count)]
+    right_hand_side = [0.0] * unique_count
+    for index in range(unique_count):
+        previous = (index - 1) % unique_count
+        following = (index + 1) % unique_count
+        previous_span = spans[previous]
+        following_span = spans[index]
+        matrix[index][previous] += previous_span
+        matrix[index][index] += 2.0 * (previous_span + following_span)
+        matrix[index][following] += following_span
+        right_hand_side[index] = 6.0 * (
+            secants[index] - secants[previous]
+        )
+
+    for column in range(unique_count):
+        pivot = max(
+            range(column, unique_count),
+            key=lambda row: abs(matrix[row][column]),
+        )
+        if pivot != column:
+            matrix[column], matrix[pivot] = matrix[pivot], matrix[column]
+            right_hand_side[column], right_hand_side[pivot] = (
+                right_hand_side[pivot],
+                right_hand_side[column],
+            )
+        for row in range(column + 1, unique_count):
+            factor = matrix[row][column] / matrix[column][column]
+            for entry in range(column, unique_count):
+                matrix[row][entry] -= factor * matrix[column][entry]
+            right_hand_side[row] -= factor * right_hand_side[column]
+
+    second_derivatives = [0.0] * unique_count
+    for row in range(unique_count - 1, -1, -1):
+        second_derivatives[row] = (
+            right_hand_side[row]
+            - sum(
+                matrix[row][column] * second_derivatives[column]
+                for column in range(row + 1, unique_count)
+            )
+        ) / matrix[row][row]
+
+    slopes = []
+    for index in range(unique_count):
+        following = (index + 1) % unique_count
+        slopes.append(
+            secants[index]
+            - spans[index]
+            * (2.0 * second_derivatives[index] + second_derivatives[following])
+            / 6.0
+        )
+    return (*slopes, slopes[0])
+
+
+def _pchip_slopes(points: tuple[WaveformPoint, ...]) -> tuple[float, ...]:
+    spans = tuple(
+        right.time_ms - left.time_ms for left, right in zip(points, points[1:])
+    )
+    secants = tuple(
+        (right.flow_ml_s - left.flow_ml_s) / span
+        for left, right, span in zip(points, points[1:], spans)
+    )
+    if len(points) == 2:
+        return (0.0, 0.0)
+
+    endpoint_slope = _periodic_pchip_slope(
+        spans[-1], spans[0], secants[-1], secants[0]
+    )
+    slopes = [endpoint_slope]
+    for index in range(1, len(points) - 1):
+        slopes.append(
+            _periodic_pchip_slope(
+                spans[index - 1],
+                spans[index],
+                secants[index - 1],
+                secants[index],
+            )
+        )
+    slopes.append(endpoint_slope)
+    return tuple(slopes)
+
+
+def _periodic_pchip_slope(
+    left_span: float,
+    right_span: float,
+    left_secant: float,
+    right_secant: float,
+) -> float:
+    if (
+        left_secant == 0.0
+        or right_secant == 0.0
+        or copysign(1, left_secant) != copysign(1, right_secant)
+    ):
+        return 0.0
+    left_weight = 2.0 * right_span + left_span
+    right_weight = right_span + 2.0 * left_span
+    return (left_weight + right_weight) / (
+        left_weight / left_secant + right_weight / right_secant
+    )
 
 
 def _flow_to_q15(flow_fraction: float) -> int:
@@ -377,6 +978,19 @@ def _stroke_volume_ml(flows: tuple[float, ...], update_hz: int) -> float:
 def _validate_update_hz(update_hz: int) -> None:
     if update_hz <= 0:
         raise ValueError("update_hz must be positive")
+
+
+def _validate_control_point_count(control_point_count: int) -> None:
+    if isinstance(control_point_count, bool) or not isinstance(control_point_count, int):
+        raise ValueError("control point count must be an integer")
+    if not 2 <= control_point_count <= 20:
+        raise ValueError("control point count must be between 2 and 20")
+
+
+def _validate_control_point_interpolation(interpolation: str) -> None:
+    if interpolation not in CONTROL_POINT_INTERPOLATIONS:
+        choices = ", ".join(CONTROL_POINT_INTERPOLATIONS)
+        raise ValueError(f"interpolation must be one of: {choices}")
 
 
 def round_to_raster_ms(period_ms: float, update_hz: int) -> float:

@@ -34,18 +34,23 @@ function reserveBackendPort() {
 }
 
 async function startBackend() {
-  const projectRoot = process.env.CARDIOPUMP_PROJECT_ROOT || app.getAppPath();
   const port = await reserveBackendPort();
-  const args = [
-    "run",
-    "--project",
-    projectRoot,
-    "cardiopump-backend",
-    "--host",
-    "127.0.0.1",
-    "--port",
-    String(port),
-  ];
+  const projectRoot = process.env.CARDIOPUMP_PROJECT_ROOT || app.getAppPath();
+  const backendCommand = app.isPackaged
+    ? path.join(process.resourcesPath, "backend", "cardiopump-backend")
+    : process.env.CARDIOPUMP_UV_PATH || "uv";
+  const args = app.isPackaged
+    ? ["--host", "127.0.0.1", "--port", String(port)]
+    : [
+        "run",
+        "--project",
+        projectRoot,
+        "cardiopump-backend",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        String(port),
+      ];
   const serialPort = argumentValue("--serial-port") || process.env.CARDIOPUMP_SERIAL_PORT;
   if (serialPort) {
     args.push("--serial-port", serialPort);
@@ -54,8 +59,8 @@ async function startBackend() {
     args.push("--no-hardware");
   }
 
-  backendProcess = spawn(process.env.CARDIOPUMP_UV_PATH || "uv", args, {
-    cwd: projectRoot,
+  backendProcess = spawn(backendCommand, args, {
+    cwd: app.isPackaged ? path.dirname(backendCommand) : projectRoot,
     stdio: ["ignore", "pipe", "pipe"],
   });
   backendProcess.stdout.on("data", (chunk) => process.stdout.write(`[backend] ${chunk}`));

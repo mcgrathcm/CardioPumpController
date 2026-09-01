@@ -155,6 +155,16 @@ the backend when the desktop app exits. A renderer crash or unresponsive window
 stops main-process heartbeats so the firmware still enters its controlled
 communication fault; minimizing or unfocusing a healthy window does not.
 
+Build the self-contained Apple Silicon macOS app:
+
+```sh
+pnpm build:mac
+```
+
+The app is written to `release/mac-arm64/Cardiopump Control.app`. It bundles the
+Python backend and does not require Node.js, Python, `uv`, or `pnpm` at runtime.
+The source-checkout development commands above continue to use `uv`.
+
 Run the browser fallback and backend directly:
 
 ```sh

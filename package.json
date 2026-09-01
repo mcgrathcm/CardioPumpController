@@ -9,6 +9,8 @@
     "dev": "concurrently -k \"vite --host 127.0.0.1 --port 5173\" \"wait-on tcp:127.0.0.1:5173 && electron . --dev-url=http://127.0.0.1:5173\"",
     "dev:sim": "concurrently -k \"vite --host 127.0.0.1 --port 5173\" \"wait-on tcp:127.0.0.1:5173 && electron . --dev-url=http://127.0.0.1:5173 --no-hardware\"",
     "build": "vite build",
+    "build:backend": "uv run pyinstaller --noconfirm --clean --distpath build/backend --workpath build/pyinstaller packaging/cardiopump-backend.spec",
+    "build:mac": "pnpm build && pnpm build:backend && electron-builder --mac --arm64",
     "start": "vite build && electron .",
     "start:sim": "vite build && electron . --no-hardware",
     "test": "node --test tests-js/*.test.*"
@@ -16,7 +18,32 @@
   "devDependencies": {
     "concurrently": "^10.0.3",
     "electron": "^43.1.0",
+    "electron-builder": "^26.15.3",
     "vite": "^8.1.4",
     "wait-on": "^9.0.10"
+  },
+  "build": {
+    "appId": "edu.stanford.cardiopump-control",
+    "productName": "Cardiopump Control",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/backend/cardiopump-backend",
+        "to": "backend/cardiopump-backend"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "hardenedRuntime": false,
+      "identity": "-",
+      "target": "dir"
+    }
   }
 }

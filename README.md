@@ -22,7 +22,9 @@ Current scope:
   path. It starts as a two-point constant curve or fits 2–20 adaptively placed
   control points from a waveform file. Shape-preserving cubic (PCHIP), linear,
   and periodic-cubic interpolation are selectable; periodic cubic is smoothest but
-  may overshoot between points. PCHIP and periodic cubic match the start/end slope.
+  may overshoot between points. Commanded samples, previews, and CSV exports clip
+  that overshoot at the requested maximum flow; hardware previews and output also
+  respect the calibration limit. PCHIP and periodic cubic match the start/end slope.
   The first and last control-point markers share one flow value to close the cycle.
   Loaded source curves remain visible as a faint
   reference and can be refitted with a new point count using the number field and
@@ -45,8 +47,9 @@ Current scope:
   Arduino applies the measured forward calibration by magnitude for both flow
   directions. Before calibration, the configured waveform peak is capped at
   `1.0 mL/s`, which maps to a conservative `+-2.5 V`.
-- Pulsatile negative-flow clipping and per-cycle total stroke-volume diagnostics
-  are available in the Flow view.
+- Pulsatile negative-flow clipping and per-cycle net forward stroke-volume
+  diagnostics are available in the Flow view. Stroke volume is the signed sum of
+  the applied flow samples divided by the update rate; backflow reduces it.
 - Trigger output is pin 7, active high, with a 10 ms default pulse. Starts use a
   `0.5 s` ramp; the first trigger occurs only after that ramp reaches its target.
   Later triggers fire at each pulsatile cycle start and once per second in
@@ -60,13 +63,16 @@ Current scope:
   the Arduino-controlled relay, and latch a fault that requires manual clearing.
 - Overpressure and interlock failures stop immediately and latch a fault.
   Servo Ready must close within 250 ms of Arduino Enable and remain closed;
-  motion-time relay opening is detected without a software delay.
+  motion-time relay opening is detected without a software delay. With Arduino
+  Enable open, Servo Ready must remain unexpectedly closed for 10 ms before it
+  latches an `unexpected_servo_ready` fault.
 - DAC communication loss immediately opens Arduino Enable and latches a fault;
   start and enable commands require a responding DAC.
 - Active pump operation and controlled ramps suppress full USB telemetry so a
   stalled host cannot block the safety loop or consume the 2 ms sample budget
-  at 500 Hz. Compact, nonblocking heartbeat acknowledgements provide connection
-  freshness while running; full diagnostics return after the pump stops.
+  at 500 Hz. Compact heartbeat acknowledgements are sent in small, bounded UART
+  chunks to preserve connection freshness while running; full diagnostics return
+  after the pump stops.
 - Serial protocol version 4 uses sequence-numbered acknowledgements. Waveform
   transfers require sequential offsets and CRC32 validation before Start is
   accepted; the backend rejects incompatible firmware. Full telemetry is a
@@ -94,6 +100,9 @@ Calibration workflow:
   be loaded atomically with `CAL_LOAD`; the GUI is responsible for reloading it
   from a standalone calibration file after a board reset. Only last-fault
   diagnostics are retained on the Arduino.
+- If the backend still holds a loaded calibration file after a reset, it marks
+  it as pending and reloads it on Start. Start waits for matching Arduino
+  calibration telemetry before proceeding.
 - The Setup tab can save and load standalone calibration JSON files. Files use
   the fixed `2.5`, `5`, `7.5`, and `10 V` points and four positive, strictly
   increasing `flows_ml_s` values. Loading replaces all four RAM values atomically.

@@ -410,7 +410,7 @@ function renderTelemetry(telemetry) {
     },
     cubic: {
       label: "Periodic cubic",
-      note: "Periodic cubic matches the slope at the cycle boundary, but it can overshoot between points.",
+      note: "Periodic cubic matches the slope at the cycle boundary. Overshoot is clipped at the requested maximum flow or calibration limit.",
     },
   }[curveInterpolation] || { label: curveInterpolation, note: "" };
   elements.curveInterpolationLabel.textContent = interpolationDetails.label;

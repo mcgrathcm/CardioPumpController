@@ -226,7 +226,10 @@ class StartReadinessTests(unittest.TestCase):
 
     def test_pending_loaded_calibration_syncs_when_hardware_is_ready(self):
         bridge = Mock()
-        bridge.telemetry.return_value = self.ready
+        bridge.telemetry.return_value = self.ready | {
+            "calibration_valid": True,
+            "calibration_flows_ml_s": [0.2, 0.5, 0.9, 1.4],
+        }
         self.handler.arduino = bridge
         self.handler.server = SimpleNamespace(
             loaded_calibration_flows_ml_s=(0.2, 0.5, 0.9, 1.4),

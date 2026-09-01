@@ -66,7 +66,7 @@ class WaveformProgram:
 
     @property
     def normalized_samples(self) -> tuple[float, ...]:
-        flows = self._commanded_flows()
+        flows = self._flows_with_limit(self.max_flow_ml_s)
         max_flow = self.max_flow_ml_s
         if max_flow == 0.0:
             return tuple(0.0 for _ in flows)
@@ -110,7 +110,7 @@ class WaveformProgram:
 
     @property
     def total_stroke_volume_ml(self) -> float:
-        return _stroke_volume_ml(self._commanded_flows(), self.update_hz)
+        return _stroke_volume_ml(self._flows_with_limit(self.max_flow_ml_s), self.update_hz)
 
     def with_settings(self, max_flow_ml_s: float, period_ms: float) -> WaveformProgram:
         if not isfinite(max_flow_ml_s) or max_flow_ml_s < 0.0:
@@ -204,7 +204,7 @@ class WaveformProgram:
         requested_flows = self._commanded_flows()
         if max_flow_limit_ml_s is None:
             applied_max_flow_ml_s = self.max_flow_ml_s
-            scaled_flows = requested_flows
+            scaled_flows = self._flows_with_limit(self.max_flow_ml_s)
         else:
             applied_max_flow_ml_s = self.applied_max_flow_ml_s(max_flow_limit_ml_s)
             scaled_flows = self._flows_with_limit(max_flow_limit_ml_s)
@@ -272,6 +272,8 @@ class WaveformProgram:
     def _flows_with_limit(self, max_flow_ml_s: float) -> tuple[float, ...]:
         if not isfinite(max_flow_ml_s) or max_flow_ml_s < 0.0:
             raise ValueError("maximum flow limit must be non-negative")
+        # Match Q15 saturation, including interpolation overshoot above the requested peak.
+        max_flow_ml_s = self.applied_max_flow_ml_s(max_flow_ml_s)
         return tuple(
             max(-max_flow_ml_s, min(max_flow_ml_s, flow))
             for flow in self._commanded_flows()
@@ -471,7 +473,7 @@ def control_point_fit_from_points(
 def curve_designer_csv_text(program: WaveformProgram) -> str:
     if not program.control_point_curve:
         raise ValueError("only a Curve Designer program can be exported")
-    flows = program._commanded_flows()
+    flows = program._flows_with_limit(program.max_flow_ml_s)
     lines = [
         "# Cardiopump Curve Designer export",
         f"# Interpolation = {program.interpolation}",
@@ -965,14 +967,8 @@ def _flow_to_q15(flow_fraction: float) -> int:
 
 
 def _stroke_volume_ml(flows: tuple[float, ...], update_hz: int) -> float:
-    if not flows:
-        return 0.0
-    # Total displaced volume counts reverse flow by magnitude.
-    dt_s = 1.0 / update_hz
-    return sum(
-        (abs(flows[index]) + abs(flows[(index + 1) % len(flows)])) * 0.5 * dt_s
-        for index in range(len(flows))
-    )
+    # One full cycle of uniformly held samples; reverse flow subtracts volume.
+    return sum(flows) / update_hz
 
 
 def _validate_update_hz(update_hz: int) -> None:

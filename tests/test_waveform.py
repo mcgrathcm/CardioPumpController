@@ -282,9 +282,50 @@ class WaveformProgramTests(unittest.TestCase):
         program = program_from_text("0 1\n500 -1\n1000 1\n", update_hz=4)
         clipped = program.with_clip_negative_flow(True)
 
+        self.assertAlmostEqual(program.total_stroke_volume_ml, 0.0)
+        self.assertAlmostEqual(program.to_json()["total_stroke_volume_ml"], 0.0)
         self.assertEqual(clipped.samples, (32767, 0, 0, 0))
         self.assertEqual(clipped.negative_clipped_sample_count, 1)
         self.assertAlmostEqual(clipped.total_stroke_volume_ml, 0.25)
+
+    def test_stroke_volume_is_signed_and_scales_with_period(self):
+        for flow, expected_volume in ((1.0, 2.0), (-1.0, -2.0), (0.0, 0.0)):
+            with self.subTest(flow=flow):
+                program = program_from_text(f"0 {flow}\n2000 {flow}\n", update_hz=4)
+                self.assertAlmostEqual(program.total_stroke_volume_ml, expected_volume)
+        program = program_from_text("0 2\n500 -1\n1000 2\n", update_hz=4)
+        # Samples are 2, 0.5, -1, 0.5 mL/s, each held for 0.25 s.
+        self.assertAlmostEqual(program.total_stroke_volume_ml, 0.5)
+        self.assertAlmostEqual(program.with_settings(2, 2000).total_stroke_volume_ml, 1.0)
+        self.assertAlmostEqual(program.to_json(1.0)["total_stroke_volume_ml"], 0.25)
+
+    def test_cubic_preview_export_and_volume_match_transmitted_samples(self):
+        for sign in (1, -1):
+            program = program_from_control_points(
+                tuple(WaveformPoint(t, sign * f) for t, f in (
+                    (0, 0), (100, 1), (600, 0.5), (1000, 0),
+                )),
+                interpolation="cubic",
+                update_hz=500,
+            )
+            for limit in (2.0, 0.75, 0.0):
+                with self.subTest(sign=sign, limit=limit):
+                    payload = program.to_json(limit)
+                    peak = payload["applied_max_flow_ml_s"]
+                    encoded = [sample / 32767 * peak
+                               for sample in program.samples_with_flow_limit(limit)]
+                    for point, flow in zip(payload["preview"], encoded, strict=True):
+                        self.assertAlmostEqual(point["flow_ml_s"], flow, delta=peak / 32767)
+                    self.assertAlmostEqual(payload["total_stroke_volume_ml"],
+                                           sum(encoded) / 500, delta=max(1e-12, peak / 32767))
+                    self.assertGreater(payload["clipped_sample_count"], 0)
+            payload = program.to_json()
+            exported = program_from_text(curve_designer_csv_text(program), update_hz=500)
+            self.assertAlmostEqual(exported.total_stroke_volume_ml,
+                                   payload["total_stroke_volume_ml"])
+            self.assertAlmostEqual(program.total_stroke_volume_ml,
+                                   payload["total_stroke_volume_ml"])
+            self.assertLessEqual(max(abs(p["flow_ml_s"]) for p in payload["preview"]), 1.0)
 
     def test_clips_scaled_waveform_to_external_flow_limit(self):
         program = program_from_text("0 0\n500 2\n1000 0\n", update_hz=4)

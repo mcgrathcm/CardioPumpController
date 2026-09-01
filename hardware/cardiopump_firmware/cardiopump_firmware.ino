@@ -12,6 +12,7 @@ constexpr uint8_t DacAddress = 0x58;
 constexpr unsigned long TelemetryIntervalMs = 1000;
 constexpr unsigned long HostTimeoutMs = 500;
 constexpr unsigned long ServoReleaseGraceMs = 100;
+constexpr unsigned long UnexpectedServoReadyDwellMs = 10;
 constexpr unsigned long ServoEngageGraceMs = 250;
 constexpr unsigned long RampDurationUs = 500000UL;
 constexpr unsigned long RampUpdatePeriodUs = 4000UL;
@@ -24,6 +25,7 @@ constexpr unsigned long DefaultTriggerHighUs = 10000UL;
 constexpr uint16_t DefaultWaveformRateHz = 250;
 constexpr uint16_t MaxWaveformSamples = 4096;
 constexpr uint8_t MaxSerialBytesPerLoop = 64;
+constexpr uint8_t MaxHeartbeatBytesPerLoop = 4;
 constexpr uint8_t TimingWarningPeriodDivisor = 4;
 constexpr uint8_t DacDataRegister = 0x02;
 constexpr uint8_t DacModeRegister = 0x01;
@@ -100,6 +102,8 @@ unsigned long nextWaveformUpdateUs = 0;
 unsigned long lastHostContactMs = 0;
 unsigned long lastEnableOpenedMs = 0;
 unsigned long lastEnableClosedMs = 0;
+bool unexpectedServoReadyTracking = false;
+unsigned long unexpectedServoReadySinceMs = 0;
 bool hostSessionEstablished = false;
 bool faultLatched = false;
 FaultCode faultCode = FaultNone;
@@ -1132,7 +1136,15 @@ void enforceSafety(unsigned long nowMs) {
     return;
   }
 
-  if (!arduinoEnable && servoReady && nowMs - lastEnableOpenedMs >= ServoReleaseGraceMs) {
+  bool unexpectedServoReady = !arduinoEnable
+    && servoReady
+    && nowMs - lastEnableOpenedMs >= ServoReleaseGraceMs;
+  if (!unexpectedServoReady) {
+    unexpectedServoReadyTracking = false;
+  } else if (!unexpectedServoReadyTracking) {
+    unexpectedServoReadyTracking = true;
+    unexpectedServoReadySinceMs = nowMs;
+  } else if (nowMs - unexpectedServoReadySinceMs >= UnexpectedServoReadyDwellMs) {
     enterFault(FaultUnexpectedServoReady);
     return;
   }
@@ -1579,9 +1591,10 @@ void flushHeartbeatAck() {
     return;
   }
   uint8_t remaining = heartbeatAckLength - heartbeatAckOffset;
+  uint8_t chunkSize = min(remaining, MaxHeartbeatBytesPerLoop);
   size_t written = Serial.write(
     reinterpret_cast<const uint8_t *>(heartbeatAckBuffer + heartbeatAckOffset),
-    remaining
+    chunkSize
   );
   heartbeatAckOffset += static_cast<uint8_t>(written);
   if (heartbeatAckOffset == heartbeatAckLength) {

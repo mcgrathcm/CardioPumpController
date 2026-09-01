@@ -311,39 +311,32 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                             "waveform_update_hz must be one of "
                             + ", ".join(str(rate) for rate in WAVEFORM_UPDATE_RATES)
                         )
-                    self.server.waveform_update_hz = update_hz
-                    self.server.trigger_high_ms = round_to_raster_ms(
+                    trigger_high_ms = round_to_raster_ms(
                         self.server.trigger_high_ms,
                         update_hz,
                     )
+                    programs = {}
+                    for name in (
+                        "pulsatile_waveform_program",
+                        "curve_designer_waveform_program",
+                        "curve_designer_source_program",
+                        "curve_designer_reference_program",
+                        "curve_designer_baseline_program",
+                    ):
+                        program = getattr(self.server, name)
+                        programs[name] = program.with_update_hz(update_hz) if program else None
                     if self.arduino is not None:
                         self.arduino.set_trigger_high_us(
-                            round(self.server.trigger_high_ms * 1000)
+                            round(trigger_high_ms * 1000)
                         )
-                    if self.server.pulsatile_waveform_program is not None:
-                        self.server.pulsatile_waveform_program = (
-                            self.server.pulsatile_waveform_program.with_update_hz(update_hz)
-                        )
-                    if self.server.curve_designer_waveform_program is not None:
-                        self.server.curve_designer_waveform_program = (
-                            self.server.curve_designer_waveform_program.with_update_hz(update_hz)
-                        )
+                    self.server.waveform_update_hz = update_hz
+                    self.server.trigger_high_ms = trigger_high_ms
+                    for name, program in programs.items():
+                        setattr(self.server, name, program)
                     if self.server.waveform_source == "pulsatile":
                         self.server.waveform_program = self.server.pulsatile_waveform_program
                     elif self.server.waveform_source == "curve_designer":
                         self.server.waveform_program = self.server.curve_designer_waveform_program
-                    if self.server.curve_designer_source_program is not None:
-                        self.server.curve_designer_source_program = (
-                            self.server.curve_designer_source_program.with_update_hz(update_hz)
-                        )
-                    if self.server.curve_designer_reference_program is not None:
-                        self.server.curve_designer_reference_program = (
-                            self.server.curve_designer_reference_program.with_update_hz(update_hz)
-                        )
-                    if self.server.curve_designer_baseline_program is not None:
-                        self.server.curve_designer_baseline_program = (
-                            self.server.curve_designer_baseline_program.with_update_hz(update_hz)
-                        )
                 if "waveform_scale" in payload:
                     if self.server.waveform_program is None:
                         raise RuntimeError("load a waveform before changing waveform scale")
@@ -856,16 +849,20 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
                 curve_designer["original_stroke_volume_ml"] = original_json[
                     "total_stroke_volume_ml"
                 ]
-        if hardware.get("connected") and hardware.get("fresh") and (
-            hardware.get("fault_latched") or hardware.get("controlled_stop_active")
-        ):
-            self.controller.stop(now_s)
         telemetry = self.controller.telemetry(now_s)
         hardware_running = bool(
-            hardware.get("fresh")
+            hardware.get("connected") and hardware.get("fresh")
             and hardware.get("run_mode") in ("constant", "waveform", "calibration")
         )
-        telemetry["running"] = bool(telemetry.get("running")) or hardware_running
+        if hardware.get("connected") and hardware.get("fresh") and telemetry["running"] and (
+            not hardware_running
+            or hardware.get("fault_latched")
+            or hardware.get("controlled_stop_active")
+        ):
+            self.controller.stop(now_s)
+            telemetry = self.controller.telemetry(now_s)
+        if self.arduino is not None:
+            telemetry["running"] = hardware_running
         telemetry["hardware"] = hardware
         waveform_json = (
             self.server.waveform_program.to_json(max_flow_ml_s)
@@ -928,6 +925,14 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
         )
         calibration = self.server.loaded_calibration_flows_ml_s
         if calibration is not None:
+            self.server.calibration_pending_transfer = not (
+                hardware.get("connected")
+                and hardware.get("fresh")
+                and hardware.get("protocol_compatible")
+                and hardware.get("calibration_valid")
+                and [round(flow * 1_000_000) for flow in hardware.get("calibration_flows_ml_s", [])]
+                == [round(flow * 1_000_000) for flow in calibration]
+            )
             hardware = dict(hardware)
             hardware.update(
                 calibration_valid=True,
@@ -948,13 +953,18 @@ class CardiopumpRequestHandler(BaseHTTPRequestHandler):
             or self.arduino is None
             or not hardware.get("connected")
             or not hardware.get("fresh")
+            or not hardware.get("protocol_compatible")
         ):
             return hardware
         self.arduino.load_calibration(calibration)
         self.arduino.request_telemetry()
-        time.sleep(0.05)
-        self.server.calibration_pending_transfer = False
-        return self._hardware_telemetry()
+        deadline_s = time.monotonic() + 1.0
+        while time.monotonic() < deadline_s:
+            hardware = self._hardware_telemetry()
+            if not hardware["calibration_pending_transfer"]:
+                return hardware
+            time.sleep(0.01)
+        raise RuntimeError("Arduino did not confirm calibration load")
 
     def _require_start_ready(self, hardware: dict[str, object]) -> None:
         if not hardware.get("connected"):

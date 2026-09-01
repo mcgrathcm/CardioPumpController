@@ -12,4 +12,5 @@ test("packaged app launches its bundled backend", () => {
   assert.match(main, /process\.resourcesPath, "backend", "cardiopump-backend"/);
   assert.equal(packageJson.build.extraResources[0].from, "build/backend/cardiopump-backend");
   assert.equal(packageJson.build.extraResources[0].to, "backend/cardiopump-backend");
+  assert.equal(packageJson.build.mac.icon, "build-resources/icon.svg");
 });

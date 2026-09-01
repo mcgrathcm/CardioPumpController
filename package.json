@@ -42,6 +42,7 @@
     "mac": {
       "category": "public.app-category.utilities",
       "hardenedRuntime": false,
+      "icon": "build-resources/icon.svg",
       "identity": "-",
       "target": "dir"
     }

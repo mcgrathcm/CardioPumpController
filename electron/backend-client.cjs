@@ -55,7 +55,6 @@ function startHeartbeat(client, intervalMs = 100) {
       inFlight = false;
     }
   }, intervalMs);
-  timer.unref();
   return () => clearInterval(timer);
 }
 

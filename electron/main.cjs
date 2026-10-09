@@ -1,13 +1,15 @@
 const { spawn } = require("node:child_process");
+const { readFile } = require("node:fs/promises");
 const net = require("node:net");
 const path = require("node:path");
-const { app, BrowserWindow, ipcMain } = require("electron");
-const { BackendClient, startHeartbeat } = require("./backend-client.cjs");
+const { Worker } = require("node:worker_threads");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { BackendClient } = require("./backend-client.cjs");
 
 let mainWindow = null;
 let backendProcess = null;
 let backendClient = null;
-let stopHeartbeat = null;
+let heartbeatWorker = null;
 let quitting = false;
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
@@ -87,14 +89,19 @@ async function startBackend() {
 
 function startMainHeartbeat() {
   stopMainHeartbeat();
-  stopHeartbeat = startHeartbeat(backendClient, 100);
-  console.log("Electron main-process heartbeat started.");
+  heartbeatWorker = new Worker(path.join(__dirname, "heartbeat-worker.cjs"), {
+    workerData: { origin: backendClient.origin },
+  });
+  heartbeatWorker.on("error", (error) => {
+    console.error("Cardiopump heartbeat worker failed:", error);
+  });
+  console.log("Electron heartbeat worker started.");
 }
 
 function stopMainHeartbeat() {
-  if (stopHeartbeat) {
-    stopHeartbeat();
-    stopHeartbeat = null;
+  if (heartbeatWorker) {
+    heartbeatWorker.terminate();
+    heartbeatWorker = null;
   }
 }
 
@@ -157,6 +164,27 @@ ipcMain.handle("backend:info", () => ({
   ready: backendClient !== null,
   mainOwnsHeartbeat: true,
 }));
+
+ipcMain.handle("file:open-text", async (_event, inputId) => {
+  const extensions = {
+    "waveform-file": ["txt", "csv"],
+    "curve-designer-file": ["txt", "csv", "json"],
+    "calibration-file": ["json"],
+  }[inputId];
+  if (!Array.isArray(extensions)) {
+    throw new Error("file input is not allowed");
+  }
+  // Use a sheet; its native startup can still pause the main thread on macOS.
+  const result = await dialog.showOpenDialog(mainWindow, {
+    properties: ["openFile"],
+    filters: [{ name: "Control files", extensions }],
+  });
+  if (result.canceled) {
+    return null;
+  }
+  const filePath = result.filePaths[0];
+  return { name: path.basename(filePath), text: await readFile(filePath, "utf8") };
+});
 
 app.on("second-instance", () => {
   if (mainWindow) {

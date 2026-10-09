@@ -20,6 +20,11 @@ test("safety-critical confirmations remain nonblocking", () => {
   assert.doesNotMatch(app, /\b(?:alert|confirm|prompt)\s*\(/);
 });
 
+test("fault reset is available above every navigation tab", () => {
+  const topbar = html.slice(0, html.indexOf('<div class="app-shell">'));
+  assert.match(topbar, /id="clear-fault-button"/);
+});
+
 test("setup exposes the raster toggle and calibration curve workspace", () => {
   assert.match(html, /id="waveform-rate-toggle"[^>]+type="checkbox"[^>]+role="switch"/);
   assert.match(html, /id="calibration-canvas"/);

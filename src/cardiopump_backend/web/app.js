@@ -1796,8 +1796,7 @@ async function setMode(mode, flowMode = mode, waveformSource = null) {
   }
 }
 
-async function loadWaveform() {
-  const file = elements.waveformFile.files[0];
+async function loadWaveform(file = elements.waveformFile.files[0]) {
   if (!file) {
     return;
   }
@@ -1845,8 +1844,7 @@ async function initializeCurveDesigner() {
   }
 }
 
-async function loadCurveDesignerFile() {
-  const file = elements.curveDesignerFile.files[0];
+async function loadCurveDesignerFile(file = elements.curveDesignerFile.files[0]) {
   if (!file) {
     return;
   }
@@ -2127,8 +2125,7 @@ async function clearFault() {
   }
 }
 
-async function loadCalibrationFile() {
-  const file = elements.calibrationFile.files[0];
+async function loadCalibrationFile(file = elements.calibrationFile.files[0]) {
   if (!file) {
     return;
   }
@@ -2360,8 +2357,27 @@ elements.flowTabButtons.forEach((button) => {
     setMode(mode);
   });
 });
-elements.waveformFile.addEventListener("change", loadWaveform);
-elements.curveDesignerFile.addEventListener("change", loadCurveDesignerFile);
+function bindFileInput(input, loadFile) {
+  input.addEventListener("change", () => loadFile());
+  input.addEventListener("click", async (event) => {
+    if (!window.cardiopump?.openTextFile) {
+      return;
+    }
+    event.preventDefault();
+    try {
+      const selected = await window.cardiopump.openTextFile(input.id);
+      if (selected) {
+        await loadFile(new File([selected.text], selected.name));
+      }
+    } catch (error) {
+      elements.controlMessage.textContent = error.message;
+      elements.controlMessage.className = "message error";
+    }
+  });
+}
+
+bindFileInput(elements.waveformFile, loadWaveform);
+bindFileInput(elements.curveDesignerFile, loadCurveDesignerFile);
 elements.curveControlPointCount.addEventListener("change", updateCurveDesignerPointCount);
 elements.curvePointCountDecrease.addEventListener("click", () => stepCurveDesignerPointCount(-1));
 elements.curvePointCountIncrease.addEventListener("click", () => stepCurveDesignerPointCount(1));
@@ -2416,7 +2432,7 @@ elements.mainEnableButton.addEventListener("click", toggleMainEnable);
 elements.mainStartButton.addEventListener("click", toggleStartStop);
 elements.overpressureStatus.addEventListener("click", resetPressureLatch);
 elements.clearFaultButton.addEventListener("click", clearFault);
-elements.calibrationFile.addEventListener("change", loadCalibrationFile);
+bindFileInput(elements.calibrationFile, loadCalibrationFile);
 elements.calibrationPoints.addEventListener("click", (event) => {
   const button = event.target.closest("[data-calibration-voltage]");
   if (!button || button.disabled) {

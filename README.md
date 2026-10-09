@@ -8,8 +8,10 @@ Current scope:
 - Electron desktop GUI built with Vite and connected to the Arduino over USB
   serial through the existing Python control backend. Electron launches and
   owns the backend process, proxies renderer API requests through a restricted
-  preload bridge, and sends the 100 ms heartbeat from its main process. Losing
+  preload bridge, and sends the 100 ms heartbeat from a dedicated worker. Losing
   renderer focus or minimizing the window therefore does not pause heartbeats.
+  File loading uses asynchronous Electron dialogs. The worker also keeps the
+  heartbeat running through native file-picker startup pauses.
 - The browser GUI remains available as a development fallback. In browser mode
   only, the renderer sends the heartbeat because no Electron main process exists.
 - Constant flow commands use non-negative `mL/s` values and are mapped to `+-10 V`.
@@ -150,9 +152,9 @@ pnpm start -- --serial-port=/dev/cu.usbmodem90706925F9BC2
 
 The Electron app requires `uv` while running from this source checkout because
 the main process launches `uv run cardiopump-backend`. It uses an ephemeral
-localhost port, maintains the firmware heartbeat in the main process, and stops
+localhost port, maintains the firmware heartbeat in a worker, and stops
 the backend when the desktop app exits. A renderer crash or unresponsive window
-stops main-process heartbeats so the firmware still enters its controlled
+stops the heartbeat worker so the firmware still enters its controlled
 communication fault; minimizing or unfocusing a healthy window does not.
 
 Build the self-contained Apple Silicon macOS app:

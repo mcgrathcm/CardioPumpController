@@ -11,6 +11,7 @@
     "build": "vite build",
     "build:backend": "uv run pyinstaller --noconfirm --clean --distpath build/backend --workpath build/pyinstaller packaging/cardiopump-backend.spec",
     "build:mac": "pnpm build && pnpm build:backend && electron-builder --mac --arm64",
+    "build:linux": "pnpm build && pnpm build:backend && electron-builder --linux --x64",
     "start": "vite build && electron .",
     "start:sim": "vite build && electron . --no-hardware",
     "test": "node --test tests-js/*.test.*"
@@ -39,6 +40,9 @@
         "to": "backend/cardiopump-backend"
       }
     ],
+    "linux": {
+      "target": "tar.gz"
+    },
     "mac": {
       "category": "public.app-category.utilities",
       "hardenedRuntime": false,

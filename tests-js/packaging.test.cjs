@@ -14,3 +14,11 @@ test("packaged app launches its bundled backend", () => {
   assert.equal(packageJson.build.extraResources[0].to, "backend/cardiopump-backend");
   assert.equal(packageJson.build.mac.icon, "build-resources/icon.svg");
 });
+
+test("Linux build bundles the backend before packaging an x86_64 archive", () => {
+  assert.equal(
+    packageJson.scripts["build:linux"],
+    "pnpm build && pnpm build:backend && electron-builder --linux --x64",
+  );
+  assert.equal(packageJson.build.linux.target, "tar.gz");
+});

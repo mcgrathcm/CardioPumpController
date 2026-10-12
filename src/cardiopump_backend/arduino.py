@@ -383,7 +383,7 @@ class ArduinoSerialBridge:
     def _connect(self) -> None:
         port = self._configured_port or self._autodetect_port()
         if port is None:
-            self._set_error("no /dev/cu.usbmodem* port found")
+            self._set_error("no Arduino port found (/dev/cu.usbmodem*, /dev/ttyACM*, /dev/ttyUSB*)")
             return
 
         try:
@@ -710,8 +710,11 @@ class ArduinoSerialBridge:
 
     @staticmethod
     def _autodetect_port() -> str | None:
-        ports = sorted(glob.glob("/dev/cu.usbmodem*"))
-        return ports[-1] if ports else None
+        for pattern in ("/dev/cu.usbmodem*", "/dev/ttyACM*", "/dev/ttyUSB*"):
+            ports = sorted(glob.glob(pattern))
+            if ports:
+                return ports[-1]
+        return None
 
     @staticmethod
     def _parse_bool(value: str | None) -> bool | None:

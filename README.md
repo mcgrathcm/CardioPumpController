@@ -167,6 +167,39 @@ The app is written to `release/mac-arm64/Cardiopump Control.app`. It bundles the
 Python backend and does not require Node.js, Python, `uv`, or `pnpm` at runtime.
 The source-checkout development commands above continue to use `uv`.
 
+Build the self-contained Ubuntu x86_64 app **on the Linux computer**. Install
+Node.js 22.12 or newer, pnpm 11, and `uv`, then run from the project folder:
+
+```sh
+pnpm install --frozen-lockfile
+uv sync
+pnpm build:linux
+```
+
+This builds the Python backend on Linux and writes a portable `.tar.gz` archive
+to `release/`, plus an unpacked app in `release/linux-unpacked/`. Distribute the
+archive and extract the entire directory before running it. The app bundles
+Python and requires neither Node.js nor `uv` at runtime.
+
+To check the packaged app without connecting to hardware, or select a Linux
+serial port explicitly:
+
+```sh
+./release/linux-unpacked/cardiopump-control --no-hardware
+./release/linux-unpacked/cardiopump-control --serial-port=/dev/ttyACM0
+```
+
+On Ubuntu, the account running the app needs access to the serial port. If it
+reports `Permission denied`, add that account to `dialout` and log out and back
+in before retrying:
+
+```sh
+sudo usermod -a -G dialout "$USER"
+```
+
+See [Arduino's Linux port-access guide](https://support.arduino.cc/hc/en-us/articles/360016495679-Fix-port-access-on-Linux)
+for checking the port's group and whether another program has it open.
+
 Run the browser fallback and backend directly:
 
 ```sh
@@ -175,8 +208,10 @@ uv run cardiopump-backend
 
 Open `http://127.0.0.1:8765` in a browser.
 
-By default the backend auto-connects to the last `/dev/cu.usbmodem*` Arduino
-port it finds. To force a port:
+By default the backend checks `/dev/cu.usbmodem*` on macOS and `/dev/ttyACM*`,
+then `/dev/ttyUSB*`, on Linux, choosing the last sorted match in the first
+nonempty group. If multiple devices are connected, select the Arduino's port
+explicitly. To force a port:
 
 ```sh
 uv run cardiopump-backend --serial-port /dev/cu.usbmodem90706925F9BC2

@@ -2,7 +2,7 @@ import threading
 import time
 import unittest
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from cardiopump_backend.arduino import (
     POSITIONAL_TELEMETRY_FIELDS,
@@ -11,6 +11,51 @@ from cardiopump_backend.arduino import (
 )
 from cardiopump_backend.server import CardiopumpRequestHandler
 from cardiopump_backend.waveform import program_from_text
+
+
+class ArduinoPortDetectionTests(unittest.TestCase):
+    def test_detects_macos_and_linux_ports(self):
+        for pattern, ports in (
+            ("/dev/cu.usbmodem*", ["/dev/cu.usbmodem2", "/dev/cu.usbmodem1"]),
+            ("/dev/ttyACM*", ["/dev/ttyACM1", "/dev/ttyACM0"]),
+            ("/dev/ttyUSB*", ["/dev/ttyUSB1", "/dev/ttyUSB0"]),
+        ):
+            with self.subTest(pattern=pattern), patch(
+                "cardiopump_backend.arduino.glob.glob",
+                side_effect=lambda candidate: ports if candidate == pattern else [],
+            ):
+                self.assertEqual(ArduinoSerialBridge._autodetect_port(), ports[0])
+
+    def test_prefers_linux_acm_over_usb_serial_adapters(self):
+        with patch(
+            "cardiopump_backend.arduino.glob.glob",
+            side_effect=lambda pattern: {
+                "/dev/ttyACM*": ["/dev/ttyACM0"],
+                "/dev/ttyUSB*": ["/dev/ttyUSB0"],
+            }.get(pattern, []),
+        ):
+            self.assertEqual(ArduinoSerialBridge._autodetect_port(), "/dev/ttyACM0")
+
+    def test_no_connected_port_returns_none(self):
+        with patch("cardiopump_backend.arduino.glob.glob", return_value=[]):
+            self.assertIsNone(ArduinoSerialBridge._autodetect_port())
+
+    def test_configured_linux_port_bypasses_autodetection(self):
+        bridge = object.__new__(ArduinoSerialBridge)
+        bridge._configured_port = "/dev/ttyACM2"
+        bridge._baudrate = 115200
+        bridge._lock = threading.Lock()
+        bridge._state = ArduinoState()
+        bridge._autodetect_port = Mock(side_effect=AssertionError("must use configured port"))
+        bridge.request_telemetry = Mock()
+        with patch("cardiopump_backend.arduino.os.open", return_value=7) as open_port, patch(
+            "cardiopump_backend.arduino.tty.setraw"
+        ), patch("cardiopump_backend.arduino.termios.tcgetattr", return_value=[0] * 7), patch(
+            "cardiopump_backend.arduino.termios.tcsetattr"
+        ):
+            bridge._connect()
+        self.assertEqual(open_port.call_args.args[0], "/dev/ttyACM2")
+        self.assertTrue(bridge._state.connected)
 
 
 class ArduinoTelemetryTests(unittest.TestCase):
